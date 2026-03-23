@@ -96,6 +96,53 @@ class TestCODTConfigSetters:
 
 
 # ======================================================================
+# Dot-access
+# ======================================================================
+
+
+class TestCODTConfigDotAccess:
+    """Tests for attribute-style get/set of namelist parameters."""
+
+    def test_get(self) -> None:
+        cfg = CODTConfig()
+        assert cfg.tref == 21.5
+        assert cfg.simulation_name == "default_sim"
+        assert cfg.do_microphysics is True
+
+    def test_set(self) -> None:
+        cfg = CODTConfig()
+        cfg.tref = 22.0
+        cfg.simulation_name = "dot_test"
+        assert cfg.tref == 22.0
+        assert cfg.params.get("tref") == 22.0
+        assert cfg.simulation_name == "dot_test"
+
+    def test_set_type_checking(self) -> None:
+        cfg = CODTConfig()
+        with pytest.raises(TypeError):
+            cfg.tref = "not a number"
+
+    def test_invalid_attr_raises(self) -> None:
+        cfg = CODTConfig()
+        with pytest.raises(AttributeError):
+            _ = cfg.nonexistent_param
+
+    def test_own_attrs_unaffected(self) -> None:
+        cfg = CODTConfig()
+        assert isinstance(cfg.params, Namelist)
+        assert isinstance(cfg.injection, InjectionData)
+        assert isinstance(cfg.bins, BinData)
+
+    def test_dir_includes_params(self) -> None:
+        cfg = CODTConfig()
+        d = dir(cfg)
+        assert "tref" in d
+        assert "simulation_name" in d
+        assert "do_microphysics" in d
+        assert "params" in d
+
+
+# ======================================================================
 # Write
 # ======================================================================
 

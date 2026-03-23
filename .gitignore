@@ -10,6 +10,7 @@ build/
 # Testing
 pytest-of-*/
 .pytest_cache/
+notebooks/
 
 # Simulation output (local only)
 test_runs/

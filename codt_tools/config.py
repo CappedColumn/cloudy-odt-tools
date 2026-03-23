@@ -835,6 +835,73 @@ class CODTConfig:
         self.bins.set(edges)
 
     # ------------------------------------------------------------------
+    # Dot-access for namelist parameters
+    # ------------------------------------------------------------------
+
+    # Attributes that belong to the CODTConfig instance itself (not the
+    # namelist).  These must bypass the namelist delegation in __setattr__.
+    _OWN_ATTRS: set[str] = {"params", "injection", "bins"}
+
+    def __getattr__(self, name: str) -> Any:
+        """Attribute-style read access to namelist parameters.
+
+        Only called when normal attribute lookup fails, so instance
+        attributes (``params``, ``injection``, ``bins``) and properties
+        (``name``) are unaffected.
+
+        Examples
+        --------
+        >>> cfg = CODTConfig()
+        >>> cfg.tref
+        21.5
+        """
+        # Guard against recursion during deepcopy/pickle — params may not
+        # exist yet when Python is reconstructing the object.
+        if name == "params" or "params" not in self.__dict__:
+            raise AttributeError(name)
+        try:
+            return self.params.get(name)
+        except KeyError:
+            raise AttributeError(
+                f"'{type(self).__name__}' has no attribute '{name}'"
+            ) from None
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Attribute-style write access to namelist parameters.
+
+        If *name* is a known namelist parameter, the value is routed
+        through :meth:`Namelist.set` (with type checking).  Otherwise
+        normal attribute assignment is used.
+
+        Examples
+        --------
+        >>> cfg = CODTConfig()
+        >>> cfg.tref = 22.0
+        >>> cfg.tref
+        22.0
+        """
+        # During __init__ or for own instance attributes, use normal path.
+        if name in self._OWN_ATTRS or not hasattr(self, "params"):
+            object.__setattr__(self, name, value)
+            return
+
+        # Check if name is a namelist parameter.
+        try:
+            self.params._find_group(name)
+        except KeyError:
+            object.__setattr__(self, name, value)
+        else:
+            self.params.set(**{name: value})
+
+    def __dir__(self) -> list[str]:
+        """Include namelist parameter names for tab-completion."""
+        base = set(super().__dir__())
+        if hasattr(self, "params"):
+            for group_params in self.params._data.values():
+                base.update(group_params.keys())
+        return sorted(base)
+
+    # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
 
