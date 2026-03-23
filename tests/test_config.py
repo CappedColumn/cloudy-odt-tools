@@ -96,6 +96,53 @@ class TestCODTConfigSetters:
 
 
 # ======================================================================
+# Dot-access
+# ======================================================================
+
+
+class TestCODTConfigDotAccess:
+    """Tests for attribute-style get/set of namelist parameters."""
+
+    def test_get(self) -> None:
+        cfg = CODTConfig()
+        assert cfg.tref == 21.5
+        assert cfg.simulation_name == "default_sim"
+        assert cfg.do_microphysics is True
+
+    def test_set(self) -> None:
+        cfg = CODTConfig()
+        cfg.tref = 22.0
+        cfg.simulation_name = "dot_test"
+        assert cfg.tref == 22.0
+        assert cfg.params.get("tref") == 22.0
+        assert cfg.simulation_name == "dot_test"
+
+    def test_set_type_checking(self) -> None:
+        cfg = CODTConfig()
+        with pytest.raises(TypeError):
+            cfg.tref = "not a number"
+
+    def test_invalid_attr_raises(self) -> None:
+        cfg = CODTConfig()
+        with pytest.raises(AttributeError):
+            _ = cfg.nonexistent_param
+
+    def test_own_attrs_unaffected(self) -> None:
+        cfg = CODTConfig()
+        assert isinstance(cfg.params, Namelist)
+        assert isinstance(cfg.injection, InjectionData)
+        assert isinstance(cfg.bins, BinData)
+
+    def test_dir_includes_params(self) -> None:
+        cfg = CODTConfig()
+        d = dir(cfg)
+        assert "tref" in d
+        assert "simulation_name" in d
+        assert "do_microphysics" in d
+        assert "params" in d
+
+
+# ======================================================================
 # Write
 # ======================================================================
 
@@ -271,3 +318,55 @@ class TestCODTConfigSweep:
         # Should be a copy, not the same object
         configs[0].set(tref=99.0)
         assert base.params.get("tref") != 99.0
+
+
+# ======================================================================
+# from_simulation
+# ======================================================================
+
+
+class TestCODTConfigFromSimulation:
+    """Tests for CODTConfig.from_simulation()."""
+
+    def test_recovers_params(self, sim_dir: Path) -> None:
+        cfg = CODTConfig.from_simulation(sim_dir)
+        # These were set as global attrs in the conftest fixture
+        assert cfg.tmax == 100.0
+        assert cfg.simulation_name == "test_sim"
+        assert cfg.volume_scaling == 13
+
+    def test_recovers_bin_edges(self, sim_dir: Path) -> None:
+        cfg = CODTConfig.from_simulation(sim_dir)
+        # conftest creates 11 bin edges (n_bins=10)
+        assert cfg.bins.n_edges == 11
+        assert cfg.bins.edges[0] > 0
+
+    def test_recovers_aerosol(self, sim_dir: Path) -> None:
+        # Write an aerosol_input.nc into the sim directory
+        inj = InjectionData()
+        inj.set(aerosol_name="KCl", injection_rate=1e5)
+        inj.write(sim_dir / "aerosol_input.nc")
+
+        cfg = CODTConfig.from_simulation(sim_dir)
+        assert cfg.injection.aerosol_name == "KCl"
+        np.testing.assert_allclose(cfg.injection.injection_rate, [1e5])
+
+    def test_defaults_without_aerosol(self, sim_dir: Path) -> None:
+        # No aerosol_input.nc in sim_dir → should get defaults
+        cfg = CODTConfig.from_simulation(sim_dir)
+        assert cfg.injection.aerosol_name == "NaCl"  # default
+
+    def test_can_modify_and_write(self, sim_dir: Path, tmp_path: Path) -> None:
+        cfg = CODTConfig.from_simulation(sim_dir)
+        cfg.tref = 25.0
+        cfg.simulation_name = "new_run"
+
+        out = tmp_path / "new_run" / "run"
+        cfg.write(out)
+
+        # Reload and verify
+        cfg2 = CODTConfig(out / "params.nml")
+        assert cfg2.params.get("tref") == 25.0
+        assert cfg2.name == "new_run"
+        assert (out / "bin_data.txt").is_file()
+        assert (out / "aerosol_input.nc").is_file()

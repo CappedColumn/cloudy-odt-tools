@@ -786,6 +786,71 @@ class CODTConfig:
             self.bins = BinData()
 
     # ------------------------------------------------------------------
+    # Alternate constructors
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_simulation(cls, path: Union[str, Path]) -> "CODTConfig":
+        """Build a config from a completed simulation's output directory.
+
+        Recovers the full configuration from output files:
+
+        - **Namelist parameters** from netCDF global attributes (preferred)
+          or the copied ``.nml`` file.
+        - **Aerosol injection data** from the ``aerosol_input.nc`` copy in
+          the output directory.
+        - **Bin edges** from the ``radius_edges`` variable in the output
+          netCDF (preferred) or from the ``bin_data.txt`` copy.
+
+        Parameters
+        ----------
+        path : str or Path
+            Path to the simulation output directory, or to the output
+            ``.nc`` file directly.
+
+        Returns
+        -------
+        CODTConfig
+            A new config populated from the simulation output.
+
+        Examples
+        --------
+        >>> cfg = CODTConfig.from_simulation("/output/old_run/")
+        >>> cfg.tref = 23.0
+        >>> cfg.simulation_name = "new_run"
+        >>> cfg.write("/scratch/new_run/run")
+        """
+        from codt_tools.simulation import CODTSimulation
+
+        sim = CODTSimulation(path)
+
+        # -- Build the config object without calling __init__ --
+        obj = cls.__new__(cls)
+
+        # Namelist: prefer simulation's parsed params (from netCDF attrs)
+        if sim.params is not None:
+            obj.params = copy.deepcopy(sim.params)
+        else:
+            obj.params = Namelist()
+
+        # Aerosol injection: look for aerosol_input.nc in output dir
+        aerosol_path = sim.path / "aerosol_input.nc"
+        obj.injection = InjectionData(
+            aerosol_path if aerosol_path.is_file() else None
+        )
+
+        # Bin edges: prefer radius_edges from the netCDF output
+        try:
+            edges = sim.bin_edges
+            obj.bins = BinData()
+            obj.bins.set(edges)
+        except (KeyError, AttributeError):
+            obj.bins = BinData()
+
+        sim.close()
+        return obj
+
+    # ------------------------------------------------------------------
     # Convenience setters
     # ------------------------------------------------------------------
 
@@ -833,6 +898,73 @@ class CODTConfig:
             Bin edge values in microns.
         """
         self.bins.set(edges)
+
+    # ------------------------------------------------------------------
+    # Dot-access for namelist parameters
+    # ------------------------------------------------------------------
+
+    # Attributes that belong to the CODTConfig instance itself (not the
+    # namelist).  These must bypass the namelist delegation in __setattr__.
+    _OWN_ATTRS: set[str] = {"params", "injection", "bins"}
+
+    def __getattr__(self, name: str) -> Any:
+        """Attribute-style read access to namelist parameters.
+
+        Only called when normal attribute lookup fails, so instance
+        attributes (``params``, ``injection``, ``bins``) and properties
+        (``name``) are unaffected.
+
+        Examples
+        --------
+        >>> cfg = CODTConfig()
+        >>> cfg.tref
+        21.5
+        """
+        # Guard against recursion during deepcopy/pickle — params may not
+        # exist yet when Python is reconstructing the object.
+        if name == "params" or "params" not in self.__dict__:
+            raise AttributeError(name)
+        try:
+            return self.params.get(name)
+        except KeyError:
+            raise AttributeError(
+                f"'{type(self).__name__}' has no attribute '{name}'"
+            ) from None
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Attribute-style write access to namelist parameters.
+
+        If *name* is a known namelist parameter, the value is routed
+        through :meth:`Namelist.set` (with type checking).  Otherwise
+        normal attribute assignment is used.
+
+        Examples
+        --------
+        >>> cfg = CODTConfig()
+        >>> cfg.tref = 22.0
+        >>> cfg.tref
+        22.0
+        """
+        # During __init__ or for own instance attributes, use normal path.
+        if name in self._OWN_ATTRS or not hasattr(self, "params"):
+            object.__setattr__(self, name, value)
+            return
+
+        # Check if name is a namelist parameter.
+        try:
+            self.params._find_group(name)
+        except KeyError:
+            object.__setattr__(self, name, value)
+        else:
+            self.params.set(**{name: value})
+
+    def __dir__(self) -> list[str]:
+        """Include namelist parameter names for tab-completion."""
+        base = set(super().__dir__())
+        if hasattr(self, "params"):
+            for group_params in self.params._data.values():
+                base.update(group_params.keys())
+        return sorted(base)
 
     # ------------------------------------------------------------------
     # Properties

@@ -4,7 +4,8 @@
 ## Developer Context
 - We use Python and modern Fortran
 - Prioritize correct physics and readability over optimization
-- CODT source code: https://github.com/CappedColumn/cloudy-odt/tree/main/
+- CODT source code: https://github.com/CappedColumn/cloudy-odt
+- codt_tools source code: https://github.com/CappedColumn/cloudy-odt-tools
 - All Fortran I/O and execution changes are merged to main on GitHub
 - Cluster uses SLURM, jobs run on [your partition/account info]
 - Python environment has numpy, xarray, netCDF4, matplotlib
@@ -18,7 +19,7 @@ Cloudy One-Dimensional Turbulence (CODT) model. The framework has three layers:
 2. **Execution** (`CODTRunner`) — submit jobs via SLURM, pack multiple serial runs per node
 3. **Analysis** (`CODTSimulation`) — load output, compute diagnostics, produce plots
 
-Repository: https://github.com/CappedColumn/cloudy-odt/tree/main/
+Repository: https://github.com/CappedColumn/cloudy-odt-tools
 
 ---
 
@@ -714,8 +715,7 @@ codt_tools/
 ├── simulation.py            # CODTSimulation
 ├── trajectory_io.py         # NetCDF particle trajectory reader
 ├── aerosol_io.py            # aerosol_input.nc NetCDF reader/writer
-├── plotting.py              # Plot functions (called by Simulation methods)
-└── utils.py                 # Shared utilities
+└── plotting.py              # Plot functions (called by Simulation methods)
 ```
 
 Namelist parsing is handled by `f90nml` in `config.py` (no separate `namelist_io.py`).
