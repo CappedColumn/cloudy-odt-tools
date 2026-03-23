@@ -786,6 +786,71 @@ class CODTConfig:
             self.bins = BinData()
 
     # ------------------------------------------------------------------
+    # Alternate constructors
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_simulation(cls, path: Union[str, Path]) -> "CODTConfig":
+        """Build a config from a completed simulation's output directory.
+
+        Recovers the full configuration from output files:
+
+        - **Namelist parameters** from netCDF global attributes (preferred)
+          or the copied ``.nml`` file.
+        - **Aerosol injection data** from the ``aerosol_input.nc`` copy in
+          the output directory.
+        - **Bin edges** from the ``radius_edges`` variable in the output
+          netCDF (preferred) or from the ``bin_data.txt`` copy.
+
+        Parameters
+        ----------
+        path : str or Path
+            Path to the simulation output directory, or to the output
+            ``.nc`` file directly.
+
+        Returns
+        -------
+        CODTConfig
+            A new config populated from the simulation output.
+
+        Examples
+        --------
+        >>> cfg = CODTConfig.from_simulation("/output/old_run/")
+        >>> cfg.tref = 23.0
+        >>> cfg.simulation_name = "new_run"
+        >>> cfg.write("/scratch/new_run/run")
+        """
+        from codt_tools.simulation import CODTSimulation
+
+        sim = CODTSimulation(path)
+
+        # -- Build the config object without calling __init__ --
+        obj = cls.__new__(cls)
+
+        # Namelist: prefer simulation's parsed params (from netCDF attrs)
+        if sim.params is not None:
+            obj.params = copy.deepcopy(sim.params)
+        else:
+            obj.params = Namelist()
+
+        # Aerosol injection: look for aerosol_input.nc in output dir
+        aerosol_path = sim.path / "aerosol_input.nc"
+        obj.injection = InjectionData(
+            aerosol_path if aerosol_path.is_file() else None
+        )
+
+        # Bin edges: prefer radius_edges from the netCDF output
+        try:
+            edges = sim.bin_edges
+            obj.bins = BinData()
+            obj.bins.set(edges)
+        except (KeyError, AttributeError):
+            obj.bins = BinData()
+
+        sim.close()
+        return obj
+
+    # ------------------------------------------------------------------
     # Convenience setters
     # ------------------------------------------------------------------
 
