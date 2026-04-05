@@ -52,9 +52,8 @@ _FIELD_REGISTRY: dict[str, str] = {
     "Ravg": "t",
     "LWC": "t",
     "DSD": "tr",
-    "DSD_1": "tr",
-    "DSD_2": "tr",
 }
+# DSD_1, DSD_2, ... are discovered dynamically from the netCDF file.
 
 
 class CODTSimulation:
@@ -314,7 +313,7 @@ class CODTSimulation:
         Variable names match the netCDF file exactly: ``T``, ``QV``,
         ``S``, ``W``, ``Np``, ``Nact``, ``LWC``, ``DSD``, etc.
         """
-        if name in _FIELD_REGISTRY:
+        if name in _FIELD_REGISTRY or name in self._ds.data_vars:
             return self._ds[name]
         raise AttributeError(
             f"'{type(self).__name__}' has no attribute '{name}'"
@@ -323,7 +322,10 @@ class CODTSimulation:
     @property
     def fields(self) -> list[str]:
         """List of available netCDF variable names."""
-        return [v for v in _FIELD_REGISTRY if v in self._ds]
+        registered = [v for v in _FIELD_REGISTRY if v in self._ds]
+        dynamic = [v for v in self._ds.data_vars
+                   if v.startswith("DSD_") and v not in registered]
+        return registered + sorted(dynamic)
 
     def _dims_of(self, variable: str) -> str:
         """Return the dimension hint for a variable name.
@@ -339,12 +341,14 @@ class CODTSimulation:
         KeyError
             If *variable* is not a recognized field.
         """
-        if variable not in _FIELD_REGISTRY:
-            raise KeyError(
-                f"Unknown variable '{variable}'. "
-                f"Available: {self.fields}"
-            )
-        return _FIELD_REGISTRY[variable]
+        if variable in _FIELD_REGISTRY:
+            return _FIELD_REGISTRY[variable]
+        if variable.startswith("DSD_") and variable in self._ds.data_vars:
+            return "tr"
+        raise KeyError(
+            f"Unknown variable '{variable}'. "
+            f"Available: {self.fields}"
+        )
 
     # ------------------------------------------------------------------
     # Core region
