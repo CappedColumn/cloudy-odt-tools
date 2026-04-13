@@ -46,6 +46,14 @@ Build: `source fpm_env && fpm build` -> `./build/*/app/CODT`
 Dims: `time` (unlimited), `z`, `radius`/`radius_edges` (if microphysics).
 Always: `z`, `time`, `T`, `QV`, `Tv`, `S`, `W`.
 Microphysics: `radius`, `radius_edges`, `DSD`, `DSD_1`, `DSD_2`, `Np`, `Nact`, `Nun`, `Ravg`, `LWC`.
+Budgets (always defined, `time` dim, double, accumulated per write interval then reset):
+`budget_inject_solute_mass`, `budget_inject_liquid_mass` (kg);
+`budget_fallout_liquid_mass`, `budget_fallout_solute_mass` (kg);
+`budget_condensation` (kg, net cond/evap);
+`budget_dgm_delta_T` (K, sum of per-droplet ΔT from DGM);
+`budget_diffusion_delta_T` (K), `budget_diffusion_delta_WV` (kg/kg) — domain-sum change from diffusion (≈0 for LEM periodic);
+`budget_sidewall_delta_T` (K), `budget_sidewall_delta_WV` (kg/kg) — 0 unless sidewalls enabled;
+`budget_n_injected`, `budget_n_fellout` (counts, stored as double).
 Global attrs: namelist params as `PARAMETERS.N`, `MICROPHYSICS.write_trajectories`, etc. Bools as int (0/1). Machine paths excluded.
 
 ### Particle NetCDF (`{name}_particles.nc`)
@@ -85,3 +93,5 @@ Header "N Bin-Edges", int count, then one float per line (microns).
 
 - Eddy binary reader for `_eddies.bin`
 - Snakemake example Snakefile
+- `sim.budget_totals()` cumsum helper
+- Budget closure check (inject - fallout + condensation ≈ ΔLWC)

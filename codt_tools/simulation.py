@@ -52,6 +52,19 @@ _FIELD_REGISTRY: dict[str, str] = {
     "Ravg": "t",
     "LWC": "t",
     "DSD": "tr",
+    # Budget diagnostics — accumulated per write interval then reset.
+    "budget_inject_solute_mass": "t",
+    "budget_inject_liquid_mass": "t",
+    "budget_fallout_liquid_mass": "t",
+    "budget_fallout_solute_mass": "t",
+    "budget_condensation": "t",
+    "budget_dgm_delta_T": "t",
+    "budget_diffusion_delta_T": "t",
+    "budget_diffusion_delta_WV": "t",
+    "budget_sidewall_delta_T": "t",
+    "budget_sidewall_delta_WV": "t",
+    "budget_n_injected": "t",
+    "budget_n_fellout": "t",
 }
 # DSD_1, DSD_2, ... are discovered dynamically from the netCDF file.
 
