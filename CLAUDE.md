@@ -45,7 +45,7 @@ Build: `source fpm_env && fpm build` -> `./build/*/app/CODT`
 ### Main netCDF (`{name}.nc`)
 
 Dims: `time` (unlimited), `z`, `radius`/`radius_edges` (if microphysics).
-Always: `z`, `time`, `T`, `QV`, `Tv`, `S`, `W`.
+Always: `z`, `time`, `T`, `QV`, `Tv`, `S`.
 Microphysics: `radius`, `radius_edges`, `DSD`, `DSD_1`, `DSD_2`, `Np`, `Nact`, `Nun`, `Ravg`, `LWC`.
 Budgets (always defined, `time` dim, double, accumulated per write interval then reset):
 `budget_inject_solute_mass`, `budget_inject_liquid_mass` (kg);

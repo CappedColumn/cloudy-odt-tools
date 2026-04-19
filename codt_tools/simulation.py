@@ -45,7 +45,6 @@ _FIELD_REGISTRY: dict[str, str] = {
     "QV": "tz",
     "Tv": "tz",
     "S": "tz",
-    "W": "tz",
     "Np": "t",
     "Nact": "t",
     "Nun": "t",
@@ -1369,6 +1368,19 @@ class CODTSimulation:
                 val = self._param(key)
                 if val is not None:
                     print(f"  {key:25s} = {val}")
+
+            if self._param("do_collisions"):
+                print()
+                print("Collisions:")
+                for key in ("coalescence_kernel", "do_coalescence"):
+                    val = self._param(key)
+                    if val is not None:
+                        print(f"  {key:25s} = {val}")
+                if "N_collisions" in self._ds:
+                    total_coll = int(self._ds["N_collisions"].values.sum())
+                    total_coal = int(self._ds["N_coalescences"].values.sum())
+                    print(f"  {'total collisions':25s} = {total_coll}")
+                    print(f"  {'total coalescences':25s} = {total_coal}")
 
     def __repr__(self) -> str:
         parts = [f"'{self.name}'"]
