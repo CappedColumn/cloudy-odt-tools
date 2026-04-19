@@ -25,7 +25,7 @@ Build: `source fpm_env && fpm build` -> `./build/*/app/CODT`
 
 `&PARAMETERS`: N, Lmin, Lprob, tmax, Tdiff, Tref, pres, H, volume_scaling, max_accept_prob, same_random, simulation_name, output_directory, overwrite, write_timer, write_buffer, write_eddies, do_turbulence, do_microphysics, do_special_effects, simulation_mode ('chamber'|'parcel'), integral_length_scale, kolmogorov_length_scale, dissipation_rate
 
-`&MICROPHYSICS`: init_drop_each_gridpoint, expected_Ndrops_per_gridpoint, initial_wet_radius, aerosol_file, bin_data_file, write_trajectories, trajectory_start, trajectory_end, trajectory_timer
+`&MICROPHYSICS`: init_drop_each_gridpoint, expected_Ndrops_per_gridpoint, initial_wet_radius, aerosol_file, bin_data_file, write_trajectories, trajectory_start, trajectory_end, trajectory_timer, do_collisions, do_coalescence, coalescence_kernel ('hall'|'long'|'unity'), wmax_collision, write_collisions
 
 `&SPECIALEFFECTS`: do_sidewalls, area_sw, area_bot, C_sw, sw_nudging_time, T_sw, RH_sw, P_sw, do_random_fallout, random_fallout_rate
 
@@ -38,6 +38,7 @@ Build: `source fpm_env && fpm build` -> `./build/*/app/CODT`
 | `{name}.nml` | Namelist copy |
 | `aerosol_input.nc` | Aerosol input copy |
 | `{name}_particles.nc` | Trajectories (CF ragged array, if enabled) |
+| `{name}_collisions.bin` | Collision events (unformatted stream, if enabled) |
 | `{name}_eddies.bin` | Eddy events (unformatted stream, if enabled) |
 | `DONE` | Completion marker |
 
@@ -53,13 +54,14 @@ Budgets (always defined, `time` dim, double, accumulated per write interval then
 `budget_dgm_delta_T` (K, sum of per-droplet ΔT from DGM);
 `budget_diffusion_delta_T` (K), `budget_diffusion_delta_WV` (kg/kg) — domain-sum change from diffusion (≈0 for LEM periodic);
 `budget_sidewall_delta_T` (K), `budget_sidewall_delta_WV` (kg/kg) — 0 unless sidewalls enabled;
-`budget_n_injected`, `budget_n_fellout` (counts, stored as double).
+`budget_n_injected`, `budget_n_fellout`, `budget_n_coalesced` (counts, stored as double);
+`N_collisions`, `N_coalescences` (per-interval counts).
 Global attrs: namelist params as `PARAMETERS.N`, `MICROPHYSICS.write_trajectories`, etc. Bools as int (0/1). Machine paths excluded.
 
 ### Particle NetCDF (`{name}_particles.nc`)
 
 CF contiguous ragged array. Dims: `record` (unlimited), `time_step` (unlimited).
-Per-record: particle_id, aerosol_id, gridcell, position, temperature, water_vapor, supersaturation, radius, solute_radius, activated, aerosol_category.
+Per-record: particle_id, aerosol_id, gridcell, position, temperature, water_vapor, supersaturation, radius, solute_radius, activated, aerosol_category, n_collisions, n_coalescences, radius_before_coalescence.
 Per-time-step: time, row_sizes (`cf_role="ragged_row_sizes"`).
 
 ### Eddy Binary (`{name}_eddies.bin`)
@@ -69,6 +71,15 @@ Unformatted Fortran stream. Header: N(i4), H(f8), C2(f8), ZC2(f8), Tdiff(f8), Tr
 ```python
 dt_header = np.dtype([('N','<i4'),('H','<f8'),('C2','<f8'),('ZC2','<f8'),('Tdiff','<f8'),('Tref','<f8')])
 dt_eddy = np.dtype([('M','<i4'),('L','<i4'),('time','<f8')])
+```
+
+### Collision Binary (`{name}_collisions.bin`)
+
+Unformatted Fortran stream. Header: N(i4), H(f8), domain_width(f8), volume_scaling(f8). Per-event: id_keep(i4), id_kill(i4), r_keep(f8), r_kill(f8), r_after(f8), position(f8), time(f8).
+
+```python
+dt_header = np.dtype([('N','<i4'),('H','<f8'),('domain_width','<f8'),('volume_scaling','<f8')])
+dt_record = np.dtype([('id_keep','<i4'),('id_kill','<i4'),('r_keep','<f8'),('r_kill','<f8'),('r_after','<f8'),('position','<f8'),('time','<f8')])
 ```
 
 ### Aerosol Input (`aerosol_input.nc`, schema `CODT_aerosol_input_v1`)
@@ -87,7 +98,8 @@ Header "N Bin-Edges", int count, then one float per line (microns).
 
 ## In Progress
 
-- **LEM branch** (`implement-LEM`): periodic Crank-Nicolson diffusion, -5/3 spectrum eddy selection, periodic triplet map. `simulation_mode='parcel'` with periodic BCs. New params: integral_length_scale, kolmogorov_length_scale, dissipation_rate. Not merged.
+- **LEM** (`implement-LEM`): merged (PR #11). `simulation_mode='parcel'` with periodic BCs, periodic triplet map, -5/3 eddy selection.
+- **Collision-coalescence** (`coll-coal`): merged (PR #13). Event-driven 1D CC with Hall/Long/unity kernels. New namelist params in `&MICROPHYSICS`.
 
 ## Remaining Work
 
