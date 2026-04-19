@@ -86,6 +86,11 @@ class Namelist:
             "trajectory_start":                0.0,
             "trajectory_end":                  0.0,
             "trajectory_timer":                1.0,
+            "do_collisions":                   False,
+            "do_coalescence":                  False,
+            "coalescence_kernel":              "hall",
+            "wmax_collision":                  10.0,
+            "write_collisions":                False,
         },
         "specialeffects": {
             "do_sidewalls":         False,

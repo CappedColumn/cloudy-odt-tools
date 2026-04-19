@@ -65,6 +65,9 @@ _FIELD_REGISTRY: dict[str, str] = {
     "budget_sidewall_delta_WV": "t",
     "budget_n_injected": "t",
     "budget_n_fellout": "t",
+    "budget_n_coalesced": "t",
+    "N_collisions": "t",
+    "N_coalescences": "t",
 }
 # DSD_1, DSD_2, ... are discovered dynamically from the netCDF file.
 
@@ -162,6 +165,16 @@ class CODTSimulation:
         particles_path = directory / f"{name}_particles.nc"
         self._particles_path: pathlib.Path | None = (
             particles_path if particles_path.is_file() else None
+        )
+
+        collisions_path = directory / f"{name}_collisions.bin"
+        self._collisions_path: pathlib.Path | None = (
+            collisions_path if collisions_path.is_file() else None
+        )
+
+        eddies_path = directory / f"{name}_eddies.bin"
+        self._eddies_path: pathlib.Path | None = (
+            eddies_path if eddies_path.is_file() else None
         )
 
         self._done_path: pathlib.Path | None = (
@@ -1091,6 +1104,52 @@ class CODTSimulation:
 
         ax.legend()
         return ax
+
+    # ------------------------------------------------------------------
+    # Collision data
+    # ------------------------------------------------------------------
+
+    @property
+    def has_collisions(self) -> bool:
+        """Whether collision binary data is available."""
+        return self._collisions_path is not None
+
+    def load_collisions(self) -> dict[str, np.ndarray]:
+        """Load collision events from ``{name}_collisions.bin``.
+
+        Returns
+        -------
+        dict
+            ``"header"`` — structured array with N, H, domain_width,
+            volume_scaling.
+            ``"events"`` — structured array with id_keep, id_kill,
+            r_keep, r_kill, r_after, position, time.
+
+        Raises
+        ------
+        FileNotFoundError
+            If no ``_collisions.bin`` file was found.
+        """
+        if self._collisions_path is None:
+            raise FileNotFoundError(
+                f"No collision file found for '{self.name}'. "
+                f"Expected: {self.path / f'{self.name}_collisions.bin'}"
+            )
+
+        dt_header = np.dtype([
+            ('N', '<i4'), ('H', '<f8'),
+            ('domain_width', '<f8'), ('volume_scaling', '<f8'),
+        ])
+        dt_event = np.dtype([
+            ('id_keep', '<i4'), ('id_kill', '<i4'),
+            ('r_keep', '<f8'), ('r_kill', '<f8'), ('r_after', '<f8'),
+            ('position', '<f8'), ('time', '<f8'),
+        ])
+
+        raw = np.fromfile(self._collisions_path, dtype=np.uint8)
+        header = np.frombuffer(raw[:dt_header.itemsize], dtype=dt_header)
+        events = np.frombuffer(raw[dt_header.itemsize:], dtype=dt_event)
+        return {"header": header, "events": events}
 
     # ------------------------------------------------------------------
     # Multi-simulation comparison
