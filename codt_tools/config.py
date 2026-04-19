@@ -75,6 +75,10 @@ class Namelist:
             "do_microphysics":    True,
             "do_special_effects": False,
             "overwrite":          False,
+            "simulation_mode":    "chamber",
+            "integral_length_scale":    0.5,
+            "kolmogorov_length_scale":  0.001,
+            "dissipation_rate":         0.01,
         },
         "microphysics": {
             "init_drop_each_gridpoint":       False,
