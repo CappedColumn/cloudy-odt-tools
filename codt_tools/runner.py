@@ -299,26 +299,62 @@ class CODTRunner:
             jid: active.get(jid, "COMPLETED") for jid in job_ids
         }
 
-    def collect(self, sim_names: list[str]) -> list:
+    def _resolve_output_dir(self, name: str) -> Path:
+        """Find the output directory for a simulation.
+
+        Reads ``output_directory`` from the run namelist at
+        ``{base}/{name}/run/params.nml``.  Falls back to
+        ``base_output_dir`` if the namelist doesn't exist.
+        """
+        nml_path = self.base_output_dir / name / "run" / "params.nml"
+        if nml_path.is_file():
+            from codt_tools.config import Namelist
+            nml = Namelist(nml_path)
+            output_dir = nml.get("output_directory")
+            out = Path(output_dir)
+            if not out.is_absolute():
+                out = (nml_path.parent / out).resolve()
+            return out
+        return self.base_output_dir
+
+    def collect(
+        self,
+        sim_names: list[str],
+        output_dir: Union[str, Path, None] = None,
+    ) -> list:
         """Load completed simulations as CODTSimulation objects.
+
+        For each simulation, the output directory is resolved in order:
+
+        1. *output_dir* argument (if given).
+        2. ``output_directory`` from the run namelist at
+           ``{base}/{name}/run/params.nml``.
+        3. ``base_output_dir`` as a last resort.
+
+        Output files are expected at ``{output_dir}/{name}.nc``,
+        ``{output_dir}/{name}_DONE``, etc. (flat layout, CODT v0.5.x).
 
         Parameters
         ----------
         sim_names : list[str]
             Simulation names to collect.
+        output_dir : str or Path, optional
+            Explicit output directory. Overrides namelist lookup.
 
         Returns
         -------
         list[CODTSimulation]
             One object per completed simulation.  Simulations without
-            a ``DONE`` marker are skipped with a warning.
+            a ``{name}_DONE`` marker are skipped with a warning.
         """
         from codt_tools.simulation import CODTSimulation
 
+        explicit_dir = Path(output_dir) if output_dir is not None else None
+
         results = []
         for name in sim_names:
-            sim_dir = self.base_output_dir / name
-            done_marker = sim_dir / f"{name}_DONE"
+            out = explicit_dir if explicit_dir is not None else self._resolve_output_dir(name)
+            done_marker = out / f"{name}_DONE"
             if not done_marker.is_file():
                 warnings.warn(
                     f"Simulation '{name}' has no DONE marker at "
@@ -327,7 +363,8 @@ class CODTRunner:
                     stacklevel=2,
                 )
                 continue
-            results.append(CODTSimulation(sim_dir))
+            nc_path = out / f"{name}.nc"
+            results.append(CODTSimulation(nc_path))
 
         return results
 

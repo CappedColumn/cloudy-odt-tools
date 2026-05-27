@@ -165,6 +165,72 @@ class TestSubmit:
         assert script_1.count("taskset") == 3
 
 
+class TestCollect:
+    """Tests for collect() output directory resolution."""
+
+    def test_explicit_output_dir(self, runner: CODTRunner, tmp_path: Path) -> None:
+        from conftest import _create_main_nc
+
+        out = tmp_path / "custom_output"
+        out.mkdir()
+        name = "explicit_sim"
+        _create_main_nc(out, name=name)
+        (out / f"{name}_DONE").write_text("2026-05-27\n")
+
+        results = runner.collect([name], output_dir=out)
+        assert len(results) == 1
+        assert results[0].name == name
+
+    def test_reads_namelist_for_output_dir(
+        self, runner: CODTRunner, tmp_path: Path
+    ) -> None:
+        from conftest import _create_main_nc
+
+        base = runner.base_output_dir
+        name = "nml_sim"
+
+        # Set up run directory with namelist pointing to custom output
+        out = tmp_path / "real_output"
+        out.mkdir(parents=True)
+        cfg = CODTConfig()
+        cfg.set(simulation_name=name, output_directory=str(out))
+        run_dir = base / name / "run"
+        run_dir.mkdir(parents=True)
+        cfg.params.write(run_dir / "params.nml")
+
+        # Put output in the custom directory
+        _create_main_nc(out, name=name)
+        (out / f"{name}_DONE").write_text("2026-05-27\n")
+
+        results = runner.collect([name])
+        assert len(results) == 1
+        assert results[0].name == name
+
+    def test_falls_back_to_base(self, runner: CODTRunner) -> None:
+        from conftest import _create_main_nc
+
+        base = runner.base_output_dir
+        base.mkdir(parents=True, exist_ok=True)
+        name = "fallback_sim"
+        _create_main_nc(base, name=name)
+        (base / f"{name}_DONE").write_text("2026-05-27\n")
+
+        results = runner.collect([name])
+        assert len(results) == 1
+        assert results[0].name == name
+
+    def test_skips_incomplete(self, runner: CODTRunner) -> None:
+        from conftest import _create_main_nc
+
+        base = runner.base_output_dir
+        base.mkdir(parents=True, exist_ok=True)
+        _create_main_nc(base, name="no_done")
+
+        with pytest.warns(UserWarning, match="no DONE marker"):
+            results = runner.collect(["no_done"])
+        assert len(results) == 0
+
+
 class TestRepr:
     """Test string representation."""
 
