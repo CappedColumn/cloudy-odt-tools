@@ -919,35 +919,51 @@ class CODTConfig:
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_simulation(cls, path: Union[str, Path]) -> "CODTConfig":
-        """Build a config from a completed simulation's output directory.
+    def from_simulation(
+        cls,
+        path: Union[str, Path],
+        run_dir: Union[str, Path, None] = None,
+    ) -> "CODTConfig":
+        """Build a config from a completed simulation's output.
 
-        Recovers the full configuration from output files:
+        Recovers the configuration from:
 
-        - **Namelist parameters** from netCDF global attributes (preferred)
-          or the copied ``.nml`` file.
-        - **Aerosol injection data** from the ``aerosol_input.nc`` copy in
-          the output directory.
-        - **DSD bin edges** from the ``radius_edges`` variable in the output
-          netCDF.
+        - **Namelist parameters** from netCDF global attributes (always
+          available in CODT v0.4+).
+        - **DSD bin edges** from the ``radius_edges`` variable in the
+          output netCDF.
+        - **Aerosol injection / parcel input** from the run directory
+          (required — CODT v0.5.x no longer copies input files to the
+          output directory).
 
         Parameters
         ----------
         path : str or Path
-            Path to the simulation output directory, or to the output
-            ``.nc`` file directly.
+            Path to the output ``.nc`` file, or a directory containing
+            exactly one.
+        run_dir : str or Path
+            Path to the run directory containing ``params.nml``,
+            ``aerosol_input.nc``, and optionally ``parcel_input.nc``.
+            Required because CODT v0.5.x does not copy input files to
+            the output directory.
 
         Returns
         -------
         CODTConfig
             A new config populated from the simulation output.
 
+        Raises
+        ------
+        FileNotFoundError
+            If *run_dir* is not provided or does not contain the
+            expected input files (``aerosol_input.nc``).
+
         Examples
         --------
-        >>> cfg = CODTConfig.from_simulation("/output/old_run/")
-        >>> cfg.tref = 23.0
-        >>> cfg.simulation_name = "new_run"
-        >>> cfg.write("/scratch/new_run/run")
+        >>> cfg = CODTConfig.from_simulation(
+        ...     "output/old_run.nc",
+        ...     run_dir="output/old_run/run",
+        ... )
         """
         from codt_tools.simulation import CODTSimulation
 
@@ -962,10 +978,28 @@ class CODTConfig:
         else:
             obj.params = Namelist()
 
-        # Aerosol injection: look for aerosol_input.nc in output dir
-        aerosol_path = sim.path / "aerosol_input.nc"
-        obj.injection = InjectionData(
-            aerosol_path if aerosol_path.is_file() else None
+        # Input files: require run_dir
+        if run_dir is None:
+            sim.close()
+            raise FileNotFoundError(
+                "run_dir is required: CODT v0.5.x does not copy input "
+                "files to the output directory. Pass the path to the "
+                "run directory (e.g. '{base}/{name}/run/')."
+            )
+
+        run_dir = Path(run_dir)
+        aerosol_path = run_dir / "aerosol_input.nc"
+        if not aerosol_path.is_file():
+            sim.close()
+            raise FileNotFoundError(
+                f"aerosol_input.nc not found in run_dir: {run_dir}. "
+                f"Expected: {aerosol_path}"
+            )
+        obj.injection = InjectionData(aerosol_path)
+
+        parcel_path = run_dir / "parcel_input.nc"
+        obj.parcel = ParcelInput(
+            parcel_path if parcel_path.is_file() else None
         )
 
         # DSD bin edges: prefer radius_edges from the netCDF output
@@ -974,12 +1008,6 @@ class CODTConfig:
             obj.injection.set(dsd_bin_edges=edges)
         except (KeyError, AttributeError):
             pass
-
-        # Parcel input: look for parcel_input.nc in output dir
-        parcel_path = sim.path / "parcel_input.nc"
-        obj.parcel = ParcelInput(
-            parcel_path if parcel_path.is_file() else None
-        )
 
         sim.close()
         return obj

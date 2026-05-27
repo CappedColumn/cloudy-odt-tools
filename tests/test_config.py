@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from codt_tools.config import CODTConfig, InjectionData, Namelist
+from codt_tools.config import CODTConfig, InjectionData, Namelist, ParcelInput
 
 
 # ======================================================================
@@ -412,43 +412,76 @@ class TestCODTConfigSweep:
 class TestCODTConfigFromSimulation:
     """Tests for CODTConfig.from_simulation()."""
 
-    def test_recovers_params(self, sim_dir: Path) -> None:
-        cfg = CODTConfig.from_simulation(sim_dir)
-        # These were set as global attrs in the conftest fixture
+    @pytest.fixture
+    def run_dir(self, tmp_path: Path) -> Path:
+        """Create a run directory with default input files."""
+        d = tmp_path / "run_inputs"
+        d.mkdir()
+        InjectionData().write(d / "aerosol_input.nc")
+        return d
+
+    def test_recovers_params(self, sim_dir: Path, run_dir: Path) -> None:
+        cfg = CODTConfig.from_simulation(sim_dir, run_dir=run_dir)
         assert cfg.tmax == 100.0
         assert cfg.simulation_name == "test_sim"
         assert cfg.volume_scaling == 13
 
-    def test_recovers_bin_edges(self, sim_dir: Path) -> None:
-        cfg = CODTConfig.from_simulation(sim_dir)
-        # conftest creates 11 bin edges (n_bins=10)
+    def test_recovers_bin_edges(self, sim_dir: Path, run_dir: Path) -> None:
+        cfg = CODTConfig.from_simulation(sim_dir, run_dir=run_dir)
         assert len(cfg.injection.dsd_bin_edges) == 11
         assert cfg.injection.dsd_bin_edges[0] > 0
 
-    def test_recovers_aerosol(self, sim_dir: Path) -> None:
-        # Write an aerosol_input.nc into the sim directory
+    def test_no_run_dir_raises(self, sim_dir: Path) -> None:
+        with pytest.raises(FileNotFoundError, match="run_dir is required"):
+            CODTConfig.from_simulation(sim_dir)
+
+    def test_missing_aerosol_raises(self, sim_dir: Path, tmp_path: Path) -> None:
+        empty_dir = tmp_path / "empty_run"
+        empty_dir.mkdir()
+        with pytest.raises(FileNotFoundError, match="aerosol_input.nc"):
+            CODTConfig.from_simulation(sim_dir, run_dir=empty_dir)
+
+    def test_recovers_aerosol(
+        self, sim_dir: Path, tmp_path: Path
+    ) -> None:
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
         inj = InjectionData()
         inj.set(aerosol_name="KCl", injection_rate=1e5)
-        inj.write(sim_dir / "aerosol_input.nc")
+        inj.write(run_dir / "aerosol_input.nc")
 
-        cfg = CODTConfig.from_simulation(sim_dir)
+        cfg = CODTConfig.from_simulation(sim_dir, run_dir=run_dir)
         assert cfg.injection.aerosol_name == "KCl"
         np.testing.assert_allclose(cfg.injection.injection_rate, [1e5])
 
-    def test_defaults_without_aerosol(self, sim_dir: Path) -> None:
-        # No aerosol_input.nc in sim_dir → should get defaults
-        cfg = CODTConfig.from_simulation(sim_dir)
-        assert cfg.injection.aerosol_name == "NaCl"  # default
+    def test_recovers_parcel(
+        self, sim_dir: Path, run_dir: Path
+    ) -> None:
+        pi = ParcelInput()
+        pi.set(time=[0.0, 300.0], velocity=[1.0, 0.5])
+        pi.write(run_dir / "parcel_input.nc")
 
-    def test_can_modify_and_write(self, sim_dir: Path, tmp_path: Path) -> None:
-        cfg = CODTConfig.from_simulation(sim_dir)
+        cfg = CODTConfig.from_simulation(sim_dir, run_dir=run_dir)
+        assert cfg.parcel.n_segments == 2
+        np.testing.assert_allclose(cfg.parcel.velocity, [1.0, 0.5])
+
+    def test_parcel_defaults_without_file(
+        self, sim_dir: Path, run_dir: Path
+    ) -> None:
+        cfg = CODTConfig.from_simulation(sim_dir, run_dir=run_dir)
+        assert isinstance(cfg.parcel, ParcelInput)
+        assert cfg.parcel.n_segments == 1
+
+    def test_can_modify_and_write(
+        self, sim_dir: Path, run_dir: Path, tmp_path: Path
+    ) -> None:
+        cfg = CODTConfig.from_simulation(sim_dir, run_dir=run_dir)
         cfg.tref = 25.0
         cfg.simulation_name = "new_run"
 
         out = tmp_path / "new_run" / "run"
         cfg.write(out)
 
-        # Reload and verify
         cfg2 = CODTConfig(out / "params.nml")
         assert cfg2.params.get("tref") == 25.0
         assert cfg2.name == "new_run"
