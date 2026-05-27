@@ -437,6 +437,14 @@ class CODTSimulation:
         tuple of float
             The ``(z_min, z_max)`` that was set.
         """
+        mode = self._param("simulation_mode") or "chamber"
+        if mode != "chamber":
+            raise ValueError(
+                "Core region is only meaningful for chamber mode "
+                "(Dirichlet BCs create thermal boundary layers). "
+                "Parcel mode uses periodic BCs with no boundary layers."
+            )
+
         if z_min is not None and z_max is not None:
             self._core_region = (float(z_min), float(z_max))
             return self._core_region

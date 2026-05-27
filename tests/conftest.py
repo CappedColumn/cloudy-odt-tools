@@ -19,7 +19,8 @@ import pytest
 
 def _create_main_nc(path: Path, name: str = "test_sim", n_time: int = 11,
                     n_z: int = 20, n_bins: int = 10,
-                    microphysics: bool = True) -> Path:
+                    microphysics: bool = True,
+                    mode: str = "chamber") -> Path:
     """Write a minimal main output netCDF file.
 
     Returns the path to the created file.
@@ -44,6 +45,7 @@ def _create_main_nc(path: Path, name: str = "test_sim", n_time: int = 11,
         ds.setncattr("PARAMETERS.simulation_name", name)
         ds.setncattr("PARAMETERS.do_turbulence", 1)
         ds.setncattr("PARAMETERS.do_microphysics", 1 if microphysics else 0)
+        ds.setncattr("PARAMETERS.simulation_mode", mode)
 
         # Dimensions
         ds.createDimension("time", None)  # unlimited

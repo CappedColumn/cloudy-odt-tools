@@ -265,6 +265,15 @@ class TestCoreRegion:
         p = sim.profile("T", t=50.0, full_domain=True)
         assert len(p.z) == 20
 
+    def test_core_region_rejected_for_parcel(self, tmp_path):
+        from conftest import _create_main_nc
+
+        _create_main_nc(tmp_path, name="parcel_sim", mode="parcel")
+        (tmp_path / "parcel_sim_DONE").write_text("2026-05-27\n")
+        sim = CODTSimulation(tmp_path)
+        with pytest.raises(ValueError, match="chamber mode"):
+            sim.set_core_region(z_min=0.1, z_max=0.9)
+
 
 # ── Plotting ─────────────────────────────────────────────────────────
 
