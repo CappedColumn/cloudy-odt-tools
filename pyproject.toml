@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codt-tools"
-version = "0.1.0"
+version = "0.2.0"
 description = "Configure, run, and analyze CODT (Cloudy One-Dimensional Turbulence) simulations"
 requires-python = ">=3.10"
 license = {text = "GPL-3.0-or-later"}

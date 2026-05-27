@@ -30,6 +30,11 @@ def _create_main_nc(path: Path, name: str = "test_sim", n_time: int = 11,
     rng = np.random.default_rng(42)
 
     with nc.Dataset(nc_path, "w", format="NETCDF4") as ds:
+        # Schema and version attributes
+        ds.setncattr("conventions", "CODT_output_v1")
+        ds.setncattr("code_version", "0.5.2")
+        ds.setncattr("git_commit", "abc1234")
+
         # Global attributes (namelist params)
         ds.setncattr("PARAMETERS.N", n_z)
         ds.setncattr("PARAMETERS.tmax", float(times[-1]))
@@ -56,10 +61,10 @@ def _create_main_nc(path: Path, name: str = "test_sim", n_time: int = 11,
 
         # Always-present fields
         for vname, long in [("T", "Temperature"), ("QV", "Water Vapor Mixing Ratio"),
-                            ("S", "Supersaturation"), ("W", "W-Velocity")]:
+                            ("Tv", "Virtual Temperature"), ("S", "Supersaturation")]:
             v = ds.createVariable(vname, "f4", ("time", "z"))
             v.long_name = long
-            v.units = "celsius" if vname == "T" else ("g/kg" if vname == "QV" else ("%" if vname == "S" else "m/s"))
+            v.units = {"T": "K", "QV": "kg/kg", "Tv": "K", "S": ""}[vname]
             v[:] = rng.normal(size=(n_time, n_z)).astype(np.float32)
 
         if microphysics:
@@ -183,7 +188,7 @@ def sim_dir(tmp_path):
     """
     name = "test_sim"
     _create_main_nc(tmp_path, name=name)
-    (tmp_path / "DONE").write_text("2026-03-22 12:00:00\n")
+    (tmp_path / f"{name}_DONE").write_text("2026-03-22 12:00:00\n")
     return tmp_path
 
 
@@ -193,7 +198,7 @@ def sim_dir_with_particles(tmp_path):
     name = "test_sim"
     _create_main_nc(tmp_path, name=name)
     _create_particles_nc(tmp_path, name=name)
-    (tmp_path / "DONE").write_text("2026-03-22 12:00:00\n")
+    (tmp_path / f"{name}_DONE").write_text("2026-03-22 12:00:00\n")
     return tmp_path
 
 
@@ -202,7 +207,7 @@ def sim_dir_no_micro(tmp_path):
     """Simulation directory without microphysics variables."""
     name = "test_sim"
     _create_main_nc(tmp_path, name=name, microphysics=False)
-    (tmp_path / "DONE").write_text("2026-03-22 12:00:00\n")
+    (tmp_path / f"{name}_DONE").write_text("2026-03-22 12:00:00\n")
     return tmp_path
 
 
@@ -225,4 +230,5 @@ def aerosol_data():
         "cumulative_frequency": np.array([[1.0, 1.0]]),
         "injection_time": np.array([0.0]),
         "injection_rate": np.array([5.5e5]),
+        "dsd_bin_edges": np.geomspace(0.049, 60.0, num=201),
     }

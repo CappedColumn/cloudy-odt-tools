@@ -67,6 +67,10 @@ _FIELD_REGISTRY: dict[str, str] = {
     "budget_n_coalesced": "t",
     "N_collisions": "t",
     "N_coalescences": "t",
+    # Parcel mode
+    "parcel_height": "t",
+    "parcel_pressure": "t",
+    "parcel_velocity": "t",
 }
 # DSD_1, DSD_2, ... are discovered dynamically from the netCDF file.
 
@@ -176,8 +180,9 @@ class CODTSimulation:
             eddies_path if eddies_path.is_file() else None
         )
 
+        done_path = directory / f"{name}_DONE"
         self._done_path: pathlib.Path | None = (
-            directory / "DONE" if (directory / "DONE").is_file() else None
+            done_path if done_path.is_file() else None
         )
 
     # ------------------------------------------------------------------
@@ -197,7 +202,9 @@ class CODTSimulation:
         param_attrs = {
             k: v for k, v in nc_attrs.items()
             if "." in k and k.split(".")[0] in (
-                "PARAMETERS", "MICROPHYSICS", "SPECIALEFFECTS"
+                "PARAMETERS", "PARCEL", "TURBULENCE_ODT",
+                "TURBULENCE_LEM", "MICROPHYSICS", "SPECIALEFFECTS",
+                "RADIATION",
             )
         }
 
@@ -1361,13 +1368,43 @@ class CODTSimulation:
         print()
 
         if self.params is not None:
+            mode = self._param("simulation_mode") or "chamber"
+            print(f"Mode:        {mode}")
+            print()
+
             print("Parameters:")
-            for key in ("n", "tmax", "tref", "tdiff", "pres", "h",
+            for key in ("n", "tmax", "tref", "pres", "h",
                         "volume_scaling", "do_turbulence",
-                        "do_microphysics", "do_special_effects"):
+                        "do_microphysics", "do_special_effects",
+                        "do_radiation"):
                 val = self._param(key)
                 if val is not None:
                     print(f"  {key:25s} = {val}")
+
+            if mode == "chamber":
+                print()
+                print("ODT Turbulence:")
+                for key in ("tdiff", "c2", "zc2", "lmin", "lprob",
+                            "max_accept_prob"):
+                    val = self._param(key)
+                    if val is not None:
+                        print(f"  {key:25s} = {val}")
+            elif mode == "parcel":
+                print()
+                print("LEM Turbulence:")
+                for key in ("integral_length_scale",
+                            "kolmogorov_length_scale",
+                            "dissipation_rate"):
+                    val = self._param(key)
+                    if val is not None:
+                        print(f"  {key:25s} = {val}")
+                print()
+                print("Parcel:")
+                for key in ("parcel_file", "initial_rh",
+                            "do_entrainment", "pressure_limit"):
+                    val = self._param(key)
+                    if val is not None:
+                        print(f"  {key:25s} = {val}")
 
             if self._param("do_collisions"):
                 print()

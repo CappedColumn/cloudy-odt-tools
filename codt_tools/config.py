@@ -17,6 +17,7 @@ import f90nml
 import numpy as np
 
 from codt_tools.aerosol_io import read_aerosol, write_aerosol
+from codt_tools.parcel_io import read_parcel, write_parcel
 
 
 # ======================================================================
@@ -56,36 +57,53 @@ class Namelist:
     _DEFAULTS: dict[str, dict[str, Any]] = {
         "parameters": {
             "n":                  2000,
-            "lmin":               6,
-            "lprob":              18,
             "tmax":               3600.0,
-            "tdiff":              3.0,
             "tref":               21.5,
             "pres":               1.0e5,
             "h":                  1.0,
             "volume_scaling":     100,
-            "max_accept_prob":    0.1,
             "same_random":        False,
             "simulation_name":    "default_sim",
             "output_directory":   "./output",
+            "overwrite":          False,
             "write_timer":        1.0,
             "write_buffer":       200,
             "write_eddies":       False,
             "do_turbulence":      True,
             "do_microphysics":    True,
             "do_special_effects": False,
-            "overwrite":          False,
+            "do_radiation":       False,
             "simulation_mode":    "chamber",
+            "pressure_limit":     0.0,
+        },
+        "parcel": {
+            "parcel_file":          "",
+            "initial_rh":           1.0,
+            "do_entrainment":       False,
+            "ent_rate":             2.0,
+            "n_blob":               1,
+            "psigma":               0.1,
+            "random_entrainment":   True,
+        },
+        "turbulence_odt": {
+            "tdiff":              3.0,
+            "lmin":               6,
+            "lprob":              18,
+            "max_accept_prob":    0.1,
+            "c2":                 1500.0,
+            "zc2":                1.0e5,
+        },
+        "turbulence_lem": {
             "integral_length_scale":    0.5,
             "kolmogorov_length_scale":  0.001,
             "dissipation_rate":         0.01,
         },
         "microphysics": {
-            "init_drop_each_gridpoint":       False,
-            "expected_ndrops_per_gridpoint":   3,
-            "initial_wet_radius":              1.5,
             "aerosol_file":                    "aerosol_input.nc",
-            "bin_data_file":                   "bin_data.txt",
+            "aerosol_concentration":           0.0,
+            "init_drop_each_gridpoint":        0,
+            "expected_ndrops_per_gridpoint":   3.0,
+            "initial_wet_radius":              1.5,
             "write_trajectories":              False,
             "trajectory_start":                0.0,
             "trajectory_end":                  0.0,
@@ -98,15 +116,30 @@ class Namelist:
         },
         "specialeffects": {
             "do_sidewalls":         False,
-            "area_sw":              4,
-            "area_bot":             2,
+            "area_sw":              4.0,
+            "area_bot":             2.0,
             "c_sw":                 0.42,
             "sw_nudging_time":      0.85,
             "t_sw":                 14.85,
             "rh_sw":                0.96,
-            "p_sw":                 7,
+            "p_sw":                 7.0,
             "do_random_fallout":    False,
             "random_fallout_rate":  0.33333,
+        },
+        "radiation": {
+            "radiation_method":     "two_stream",
+            "mie_data_file":        "",
+            "eps_top":              1.0,
+            "eps_bot":              1.0,
+            "sky_temp":             260.0,
+            "sky_cooling_flag":     False,
+            "rad_call_interval":    1.0,
+            "nphotons":             1000,
+            "nbins":                50,
+            "lx_rad":               0.1,
+            "ly_rad":               0.1,
+            "t_side":               290.0,
+            "max_droplets_per_cell": 100,
         },
     }
 
@@ -270,8 +303,8 @@ class Namelist:
     def write(self, path: Union[str, Path]) -> None:
         """Write the namelist to a file in Fortran namelist format.
 
-        Warns if the write directory doesn't match the paths referenced
-        by ``aerosol_file`` or ``bin_data_file`` in the namelist.
+        Warns if the write directory doesn't match the path referenced
+        by ``aerosol_file`` in the namelist.
 
         Parameters
         ----------
@@ -281,10 +314,9 @@ class Namelist:
         path = Path(path).resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Check that aerosol_file and bin_data_file are consistent
-        # with the namelist write location
+        # Check that aerosol_file is consistent with the write location
         nml_dir = path.parent
-        for key in ("aerosol_file", "bin_data_file"):
+        for key in ("aerosol_file",):
             try:
                 data_path = Path(self.get(key))
             except KeyError:
@@ -301,8 +333,39 @@ class Namelist:
                     stacklevel=2,
                 )
 
-        nml = f90nml.Namelist(self._data)
+        nml = f90nml.Namelist(self._groups_for_write())
         nml.write(path, force=True)
+
+    # Groups that are only relevant to one simulation mode.
+    _CHAMBER_ONLY_GROUPS: set[str] = {"turbulence_odt", "specialeffects"}
+    _PARCEL_ONLY_GROUPS: set[str] = {"turbulence_lem", "parcel"}
+
+    def _groups_for_write(self) -> dict[str, dict[str, Any]]:
+        """Return namelist groups filtered by simulation mode.
+
+        Chamber mode excludes ``turbulence_lem`` and ``parcel``.
+        Parcel mode excludes ``turbulence_odt`` and ``specialeffects``.
+        The ``radiation`` group is only included if ``do_radiation`` is
+        enabled.
+        """
+        try:
+            mode = self.get("simulation_mode")
+        except KeyError:
+            mode = "chamber"
+
+        if mode == "parcel":
+            skip = self._CHAMBER_ONLY_GROUPS
+        else:
+            skip = self._PARCEL_ONLY_GROUPS
+
+        try:
+            do_radiation = self.get("do_radiation")
+        except KeyError:
+            do_radiation = False
+        if not do_radiation:
+            skip = skip | {"radiation"}
+
+        return {g: p for g, p in self._data.items() if g not in skip}
 
     # ------------------------------------------------------------------
     # Internal
@@ -373,6 +436,7 @@ class InjectionData:
         self.cumulative_frequency: np.ndarray = np.array([[0.5, 1.0]])
         self.injection_time: np.ndarray = np.array([0.0])
         self.injection_rate: np.ndarray = np.array([6.66e4])
+        self.dsd_bin_edges: np.ndarray = np.geomspace(0.049, 60.0, num=201)
 
     def _read(self, path: Path) -> None:
         """Read from an aerosol_input.nc file."""
@@ -386,6 +450,7 @@ class InjectionData:
         self.cumulative_frequency = data["cumulative_frequency"]
         self.injection_time = data["injection_time"]
         self.injection_rate = data["injection_rate"]
+        self.dsd_bin_edges = data["dsd_bin_edges"]
 
     # ------------------------------------------------------------------
     # Access / modification
@@ -396,7 +461,7 @@ class InjectionData:
     _INT_1D_FIELDS: set[str] = {"n_ions", "category"}
     _FLOAT_1D_FIELDS: set[str] = {
         "molar_mass", "solute_density", "edge_radii",
-        "injection_time", "injection_rate",
+        "injection_time", "injection_rate", "dsd_bin_edges",
     }
     # cumulative_frequency is always 2D (time, bin).
     _FLOAT_2D_FIELDS: set[str] = {"cumulative_frequency"}
@@ -533,7 +598,7 @@ class InjectionData:
         return [
             "aerosol_name", "n_ions", "molar_mass", "solute_density",
             "edge_radii", "category", "cumulative_frequency",
-            "injection_time", "injection_rate",
+            "injection_time", "injection_rate", "dsd_bin_edges",
         ]
 
     # ------------------------------------------------------------------
@@ -575,6 +640,7 @@ class InjectionData:
         obj.injection_rate = np.atleast_1d(
             np.asarray(data["injection_rate"], dtype=np.float64)
         )
+        obj.dsd_bin_edges = np.asarray(data["dsd_bin_edges"], dtype=np.float64)
         return obj
 
     # ------------------------------------------------------------------
@@ -594,6 +660,8 @@ class InjectionData:
         print(f"N Injection Times:     {self.n_times}")
         print(f"  Times (s):           {self.injection_time}")
         print(f"  Rates (m-3 s-1):     {self.injection_rate}")
+        print(f"DSD Bin Edges:         {len(self.dsd_bin_edges)} edges")
+        print(f"  Range (um):          {self.dsd_bin_edges[0]:.4f} - {self.dsd_bin_edges[-1]:.4f}")
         print(f"Cumulative Freq:       shape {self.cumulative_frequency.shape}")
         for i, row in enumerate(self.cumulative_frequency):
             print(f"  Time {i}: {row}")
@@ -621,26 +689,32 @@ class InjectionData:
 
 
 # ======================================================================
-# BinData
+# ParcelInput
 # ======================================================================
 
 
-class BinData:
-    """In-memory representation of CODT droplet bin edge data.
+class ParcelInput:
+    """In-memory representation of a CODT parcel input file.
+
+    Reads and writes the ``parcel_input.nc`` format
+    (``CODT_parcel_input_v1`` or ``CODT_parcel_input_v2``).
 
     Parameters
     ----------
     path : str or Path, optional
-        Path to an existing bin_data.txt file. If ``None``, creates an
-        instance with a default log-spaced bin edge array.
+        Path to an existing ``parcel_input.nc`` file. If ``None``, creates
+        an instance with a single segment of constant 1 m/s ascent.
 
     Examples
     --------
-    >>> bins = BinData("input/bin_data.txt")
-    >>> bins.edges
-    array([0.049, 0.051, ...])
-    >>> bins.n_edges
-    201
+    Create from defaults:
+
+    >>> pi = ParcelInput()
+    >>> pi.set(time=[0.0, 300.0], velocity=[1.0, 0.5])
+
+    Load from file:
+
+    >>> pi = ParcelInput("input/parcel_input.nc")
     """
 
     def __init__(self, path: Union[str, Path, None] = None) -> None:
@@ -650,94 +724,134 @@ class BinData:
             self._read(Path(path))
 
     def _init_defaults(self) -> None:
-        """Create default log-spaced bin edges from ~0.049 to ~60 microns."""
-        self.edges: np.ndarray = np.geomspace(0.049, 60.0, num=201)
+        self.time: np.ndarray = np.array([0.0])
+        self.velocity: np.ndarray = np.array([1.0])
+        self.env_pressure: np.ndarray | None = None
+        self.env_temperature: np.ndarray | None = None
+        self.env_RH: np.ndarray | None = None
 
     def _read(self, path: Path) -> None:
-        """Parse a bin_data.txt file."""
-        if not path.is_file():
-            raise FileNotFoundError(f"Bin data file not found: {path}")
-
-        with open(path, "r") as f:
-            lines = f.readlines()
-
-        # Line 1: "N Bin-Edges"
-        # Line 2: integer count
-        n_edges = int(lines[1].strip())
-
-        # Line 3: "Droplet Bin-Edges (microns)"
-        # Lines 4+: one value per line
-        self.edges = np.array(
-            [float(lines[i].strip()) for i in range(3, 3 + n_edges)],
-            dtype=np.float64,
-        )
+        data = read_parcel(path)
+        self.time = data["time"]
+        self.velocity = data["velocity"]
+        self.env_pressure = data["env_pressure"]
+        self.env_temperature = data["env_temperature"]
+        self.env_RH = data["env_RH"]
 
     # ------------------------------------------------------------------
-    # Access
+    # Access / modification
     # ------------------------------------------------------------------
 
-    @property
-    def n_edges(self) -> int:
-        """Number of bin edges."""
-        return len(self.edges)
+    def set(self, **kwargs: Any) -> None:
+        """Set one or more attributes by name.
 
-    @property
-    def n_bins(self) -> int:
-        """Number of bins (edges - 1)."""
-        return len(self.edges) - 1
-
-    @property
-    def centers(self) -> np.ndarray:
-        """Bin center values (midpoints of adjacent edges) in microns."""
-        return 0.5 * (self.edges[:-1] + self.edges[1:])
-
-    def set(self, edges: Union[np.ndarray, list]) -> None:
-        """Replace the bin edges.
+        Array-like values are converted to numpy arrays. Setting any of
+        ``env_pressure``, ``env_temperature``, ``env_RH`` to ``None``
+        clears the environmental sounding.
 
         Parameters
         ----------
-        edges : array-like
-            New bin edge values in microns.
+        **kwargs
+            Attribute name-value pairs.
+
+        Raises
+        ------
+        AttributeError
+            If an attribute name is not valid.
         """
-        self.edges = np.asarray(edges, dtype=np.float64)
+        valid = {"time", "velocity", "env_pressure", "env_temperature", "env_RH"}
+        for key, value in kwargs.items():
+            if key not in valid:
+                raise AttributeError(
+                    f"'{key}' is not a valid ParcelInput attribute. "
+                    f"Valid: {sorted(valid)}"
+                )
+            if value is None:
+                setattr(self, key, None)
+            else:
+                setattr(self, key,
+                        np.atleast_1d(np.asarray(value, dtype=np.float64)))
 
-    # ------------------------------------------------------------------
-    # Display
-    # ------------------------------------------------------------------
+    @property
+    def n_segments(self) -> int:
+        """Number of velocity segments."""
+        return len(self.time)
 
-    def print(self) -> None:
-        """Pretty-print the bin data summary."""
-        print(f"N Bin Edges:  {self.n_edges}")
-        print(f"N Bins:       {self.n_bins}")
-        print(f"Range (um):   {self.edges[0]:.4f} - {self.edges[-1]:.4f}")
+    @property
+    def has_env_profile(self) -> bool:
+        """Whether an environmental sounding is present (v2 schema)."""
+        return self.env_pressure is not None
 
-    def __repr__(self) -> str:
-        return (
-            f"BinData(n_edges={self.n_edges}, "
-            f"range=[{self.edges[0]:.4f}, {self.edges[-1]:.4f}] um)"
-        )
+    def set_env_profile(
+        self,
+        pressure: np.ndarray | list,
+        temperature: np.ndarray | list,
+        RH: np.ndarray | list,
+    ) -> None:
+        """Set the environmental sounding for entrainment (v2 schema).
+
+        Parameters
+        ----------
+        pressure : array-like
+            Environmental pressure in Pa (monotonically decreasing).
+        temperature : array-like
+            Environmental temperature in K.
+        RH : array-like
+            Environmental relative humidity (0–1).
+        """
+        self.env_pressure = np.asarray(pressure, dtype=np.float64)
+        self.env_temperature = np.asarray(temperature, dtype=np.float64)
+        self.env_RH = np.asarray(RH, dtype=np.float64)
+
+    def clear_env_profile(self) -> None:
+        """Remove the environmental sounding (downgrade to v1 schema)."""
+        self.env_pressure = None
+        self.env_temperature = None
+        self.env_RH = None
 
     # ------------------------------------------------------------------
     # I/O
     # ------------------------------------------------------------------
 
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to the dict format used by :mod:`parcel_io`."""
+        return {
+            "time": self.time,
+            "velocity": self.velocity,
+            "env_pressure": self.env_pressure,
+            "env_temperature": self.env_temperature,
+            "env_RH": self.env_RH,
+        }
+
     def write(self, path: Union[str, Path]) -> None:
-        """Write the bin data to a file in CODT format.
+        """Write the parcel input to a NetCDF file.
 
         Parameters
         ----------
         path : str or Path
             Destination file path. Parent directories are created if needed.
         """
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        write_parcel(path, self.to_dict())
 
-        with open(path, "w") as f:
-            f.write("N Bin-Edges\n")
-            f.write(f"{self.n_edges}\n")
-            f.write("Droplet Bin-Edges (microns)\n")
-            for edge in self.edges:
-                f.write(f"{edge:.18e}\n")
+    # ------------------------------------------------------------------
+    # Display
+    # ------------------------------------------------------------------
+
+    def print(self) -> None:
+        """Pretty-print the parcel input data."""
+        print(f"N Segments:    {self.n_segments}")
+        print(f"  Times (s):   {self.time}")
+        print(f"  Vel (m/s):   {self.velocity}")
+        if self.has_env_profile:
+            print(f"Env Profile:   {len(self.env_pressure)} levels (v2)")
+            print(f"  P range:     {self.env_pressure[0]:.0f} - "
+                  f"{self.env_pressure[-1]:.0f} Pa")
+        else:
+            print("Env Profile:   none (v1)")
+
+    def __repr__(self) -> str:
+        schema = "v2" if self.has_env_profile else "v1"
+        return f"ParcelInput(n_segments={self.n_segments}, schema={schema})"
 
 
 # ======================================================================
@@ -748,18 +862,17 @@ class BinData:
 class CODTConfig:
     """Complete set of CODT input parameters.
 
-    Bundles a :class:`Namelist`, :class:`InjectionData`, and :class:`BinData`
-    into a single object that can be written to a directory, copied, and
-    swept over for parameter studies.
+    Bundles a :class:`Namelist` and :class:`InjectionData` into a single
+    object that can be written to a directory, copied, and swept over for
+    parameter studies.
 
     Parameters
     ----------
     namelist_path : str or Path, optional
-        Path to an existing ``params.nml`` file.  If provided, sibling
-        ``aerosol_input.nc`` and ``bin_data.txt`` files are also loaded
-        (based on the ``aerosol_file`` and ``bin_data_file`` namelist
-        parameters).  If ``None``, all components are initialised with
-        defaults.
+        Path to an existing ``params.nml`` file.  If provided, a sibling
+        ``aerosol_input.nc`` file is also loaded (based on the
+        ``aerosol_file`` namelist parameter).  If ``None``, all components
+        are initialised with defaults.
 
     Examples
     --------
@@ -783,16 +896,23 @@ class CODTConfig:
         if namelist_path is not None:
             nml_dir = Path(namelist_path).resolve().parent
             aerosol_path = nml_dir / self.params.get("aerosol_file")
-            bin_path = nml_dir / self.params.get("bin_data_file")
             self.injection: InjectionData = InjectionData(
                 aerosol_path if aerosol_path.is_file() else None
             )
-            self.bins: BinData = BinData(
-                bin_path if bin_path.is_file() else None
-            )
+            try:
+                parcel_file = self.params.get("parcel_file")
+            except KeyError:
+                parcel_file = ""
+            if parcel_file:
+                parcel_path = nml_dir / parcel_file
+                self.parcel: ParcelInput = ParcelInput(
+                    parcel_path if parcel_path.is_file() else None
+                )
+            else:
+                self.parcel = ParcelInput()
         else:
             self.injection = InjectionData()
-            self.bins = BinData()
+            self.parcel = ParcelInput()
 
     # ------------------------------------------------------------------
     # Alternate constructors
@@ -808,8 +928,8 @@ class CODTConfig:
           or the copied ``.nml`` file.
         - **Aerosol injection data** from the ``aerosol_input.nc`` copy in
           the output directory.
-        - **Bin edges** from the ``radius_edges`` variable in the output
-          netCDF (preferred) or from the ``bin_data.txt`` copy.
+        - **DSD bin edges** from the ``radius_edges`` variable in the output
+          netCDF.
 
         Parameters
         ----------
@@ -848,13 +968,18 @@ class CODTConfig:
             aerosol_path if aerosol_path.is_file() else None
         )
 
-        # Bin edges: prefer radius_edges from the netCDF output
+        # DSD bin edges: prefer radius_edges from the netCDF output
         try:
             edges = sim.bin_edges
-            obj.bins = BinData()
-            obj.bins.set(edges)
+            obj.injection.set(dsd_bin_edges=edges)
         except (KeyError, AttributeError):
-            obj.bins = BinData()
+            pass
+
+        # Parcel input: look for parcel_input.nc in output dir
+        parcel_path = sim.path / "parcel_input.nc"
+        obj.parcel = ParcelInput(
+            parcel_path if parcel_path.is_file() else None
+        )
 
         sim.close()
         return obj
@@ -899,14 +1024,28 @@ class CODTConfig:
     def set_bins(self, edges: Union[np.ndarray, list]) -> None:
         """Set droplet size distribution bin edges.
 
-        Delegates to :meth:`BinData.set`.
-
         Parameters
         ----------
         edges : array-like
             Bin edge values in microns.
         """
-        self.bins.set(edges)
+        self.injection.set(dsd_bin_edges=np.asarray(edges, dtype=np.float64))
+
+    def set_parcel(self, **kwargs: Any) -> None:
+        """Set parcel input attributes.
+
+        Delegates to :meth:`ParcelInput.set`.
+
+        Parameters
+        ----------
+        **kwargs
+            Attribute name-value pairs.
+
+        Examples
+        --------
+        >>> cfg.set_parcel(time=[0.0, 300.0], velocity=[1.0, 0.5])
+        """
+        self.parcel.set(**kwargs)
 
     # ------------------------------------------------------------------
     # Dot-access for namelist parameters
@@ -914,13 +1053,13 @@ class CODTConfig:
 
     # Attributes that belong to the CODTConfig instance itself (not the
     # namelist).  These must bypass the namelist delegation in __setattr__.
-    _OWN_ATTRS: set[str] = {"params", "injection", "bins"}
+    _OWN_ATTRS: set[str] = {"params", "injection", "parcel"}
 
     def __getattr__(self, name: str) -> Any:
         """Attribute-style read access to namelist parameters.
 
         Only called when normal attribute lookup fails, so instance
-        attributes (``params``, ``injection``, ``bins``) and properties
+        attributes (``params``, ``injection``) and properties
         (``name``) are unaffected.
 
         Examples
@@ -991,10 +1130,9 @@ class CODTConfig:
     def write(self, directory: Union[str, Path]) -> None:
         """Write all input files to a directory.
 
-        Writes ``aerosol_input.nc`` and ``bin_data.txt`` first, then
-        ``params.nml`` (so the namelist path-existence check passes).
-        The namelist ``aerosol_file`` and ``bin_data_file`` parameters
-        are set to the bare filenames before writing.
+        Writes data files first, then ``params.nml`` (so the namelist
+        path-existence check passes). For parcel mode, also writes
+        ``parcel_input.nc`` and sets ``parcel_file`` accordingly.
 
         Parameters
         ----------
@@ -1004,26 +1142,75 @@ class CODTConfig:
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
 
-        # Set relative paths for data files
-        self.params.set(
-            aerosol_file="aerosol_input.nc",
-            bin_data_file="bin_data.txt",
-        )
+        # Set relative path for data file
+        self.params.set(aerosol_file="aerosol_input.nc")
 
         # Write data files before namelist (avoids Namelist.write warning)
         self.injection.write(directory / "aerosol_input.nc")
-        self.bins.write(directory / "bin_data.txt")
+
+        if self.params.get("simulation_mode") == "parcel":
+            self.params.set(parcel_file="parcel_input.nc")
+            self.parcel.write(directory / "parcel_input.nc")
+
         self.params.write(directory / "params.nml")
 
     def validate(self) -> None:
         """Check internal consistency.
+
+        Validates mode-specific constraints:
+
+        - **Chamber mode** requires ``tdiff > 0``.
+        - **Parcel mode** requires a non-empty ``parcel_file`` and
+          ``initial_rh`` in [0, 1]. If ``do_entrainment`` is enabled,
+          the parcel input must have an environmental sounding (v2).
+        - Trajectory windows must be valid when enabled.
+        - CDF dimensions must match aerosol bins.
 
         Raises
         ------
         ValueError
             If any consistency check fails.
         """
-        # CDF dimensions must match bins
+        mode = self.params.get("simulation_mode")
+
+        # -- Mode-specific checks --
+        if mode == "chamber":
+            tdiff = self.params.get("tdiff")
+            if tdiff <= 0:
+                raise ValueError(
+                    f"Chamber mode requires tdiff > 0, got {tdiff}."
+                )
+
+        elif mode == "parcel":
+            parcel_file = self.params.get("parcel_file")
+            if not parcel_file:
+                raise ValueError(
+                    "Parcel mode requires parcel_file to be set."
+                )
+
+            initial_rh = self.params.get("initial_rh")
+            if not 0.0 <= initial_rh <= 1.0:
+                raise ValueError(
+                    f"initial_rh must be in [0, 1], got {initial_rh}."
+                )
+
+            if self.params.get("do_entrainment") and not self.parcel.has_env_profile:
+                raise ValueError(
+                    "do_entrainment requires an environmental sounding "
+                    "in the parcel input (v2 schema). Use "
+                    "cfg.parcel.set_env_profile(...)."
+                )
+
+            if self.parcel.n_segments < 1:
+                raise ValueError("Parcel input must have at least one segment.")
+
+            if abs(self.parcel.time[0]) > 1e-10:
+                raise ValueError(
+                    f"First parcel segment time must be 0, "
+                    f"got {self.parcel.time[0]}."
+                )
+
+        # -- Injection data consistency --
         n_bins = self.injection.n_bins
         cdf_cols = self.injection.cumulative_frequency.shape[1]
         if cdf_cols != n_bins:
@@ -1032,7 +1219,7 @@ class CODTConfig:
                 f"there are {n_bins} aerosol bins."
             )
 
-        # Trajectory window (if enabled)
+        # -- Trajectory window --
         if self.params.get("write_trajectories"):
             t_start = self.params.get("trajectory_start")
             t_end = self.params.get("trajectory_end")
@@ -1067,9 +1254,15 @@ class CODTConfig:
         "lmin": "Lmin",
         "lprob": "Lprob",
         "max_accept_prob": "MAP",
+        "c2": "C2",
+        "zc2": "ZC2",
         "expected_ndrops_per_gridpoint": "Ndrops",
         "initial_wet_radius": "Rw",
+        "aerosol_concentration": "Naer",
         "write_timer": "dt",
+        "integral_length_scale": "Lint",
+        "dissipation_rate": "eps",
+        "initial_rh": "RH",
     }
 
     @staticmethod

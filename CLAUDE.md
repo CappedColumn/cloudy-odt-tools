@@ -7,69 +7,86 @@ Python framework for configuring, running, and analyzing Cloudy One-Dimensional 
 - Deps: numpy, xarray, netCDF4, matplotlib, f90nml
 - Cluster: SLURM
 
-## Executable Contract
+## CODT Interface
+
+For full I/O specifications (namelist groups, input schemas, output file formats, NetCDF variables/attributes), see the `codt-io` skill. For versioning and format compatibility, see the `codt-versioning` skill.
+
+### Executable Contract
 
 ```
 ./CODT <NAMELIST_PATH>       # path MUST contain '/' (use ./params.nml)
 ```
 
-- `aerosol_file`, `bin_data_file` resolve relative to namelist parent dir
-- `output_directory` must be absolute
-- Stdout -> `{output_dir}/{sim_name}/{sim_name}.log`, stderr -> output path only
-- `DONE` file = success marker; exit 0 = success, 1 = error
+- `aerosol_file` resolves relative to namelist parent dir
+- `output_directory` can be absolute or relative (resolved from cwd); parent directory must exist
+- Output files go directly into `output_directory/`, prefixed with `simulation_name` (no auto-subdirectory)
+- Stdout redirected to `{output_dir}/{sim_name}.log` (single log file, all init + runtime messages)
+- `{sim_name}_DONE` file = success marker; exit 0 = success, 1 = error
 - `overwrite=.false.` (default) rejects if output `.nc` exists
+- Input files (namelist, aerosol NC, parcel NC) are NOT copied to output directory
 
-Build: `source fpm_env && fpm build` -> `./build/*/app/CODT`
+Build: `./build.sh` (injects version+git hash, then `fpm build`) -> `./build/*/app/CODT`
 
-## Namelist Groups
-
-`&PARAMETERS`: N, Lmin, Lprob, tmax, Tdiff, Tref, pres, H, volume_scaling, max_accept_prob, same_random, simulation_name, output_directory, overwrite, write_timer, write_buffer, write_eddies, do_turbulence, do_microphysics, do_special_effects, simulation_mode ('chamber'|'parcel'), integral_length_scale, kolmogorov_length_scale, dissipation_rate
-
-`&MICROPHYSICS`: init_drop_each_gridpoint, expected_Ndrops_per_gridpoint, initial_wet_radius, aerosol_file, bin_data_file, write_trajectories, trajectory_start, trajectory_end, trajectory_timer, do_collisions, do_coalescence, coalescence_kernel ('hall'|'long'|'unity'), wmax_collision, write_collisions
-
-`&SPECIALEFFECTS`: do_sidewalls, area_sw, area_bot, C_sw, sw_nudging_time, T_sw, RH_sw, P_sw, do_random_fallout, random_fallout_rate
-
-## Output Files (`{output_dir}/{sim_name}/`)
+### Output Files (`{output_directory}/`)
 
 | File | Description |
 |------|-------------|
-| `{name}.nc` | Main output (profiles + time series) |
-| `{name}.log` | Redirected stdout |
-| `{name}.nml` | Namelist copy |
-| `aerosol_input.nc` | Aerosol input copy |
-| `{name}_particles.nc` | Trajectories (CF ragged array, if enabled) |
+| `{name}.nc` | Main output (profiles + time series, schema `CODT_output_v1`) |
+| `{name}.log` | Redirected stdout (all initialization and runtime messages) |
+| `{name}_particles.nc` | Trajectories (CF ragged array, schema `CODT_particle_output_v1`, if enabled) |
 | `{name}_collisions.bin` | Collision events (unformatted stream, if enabled) |
 | `{name}_eddies.bin` | Eddy events (unformatted stream, if enabled) |
-| `DONE` | Completion marker |
+| `{name}_DONE` | Completion marker with timestamp |
 
-### Main netCDF (`{name}.nc`)
+Global attrs on NC files: `conventions`, `code_version` (semver), `git_commit` (short hash, `-dirty` if uncommitted). Namelist params as `PARAMETERS.N`, `MICROPHYSICS.write_trajectories`, etc. Bools as int (0/1). Mode-guarded.
 
-Dims: `time` (unlimited), `z`, `radius`/`radius_edges` (if microphysics).
-Always: `z`, `time`, `T`, `QV`, `Tv`, `S`.
-Microphysics: `radius`, `radius_edges`, `DSD`, `DSD_1`, `DSD_2`, `Np`, `Nact`, `Nun`, `Ravg`, `LWC`.
-Budgets (always defined, `time` dim, double, accumulated per write interval then reset):
-`budget_inject_solute_mass`, `budget_inject_liquid_mass` (kg);
-`budget_fallout_liquid_mass`, `budget_fallout_solute_mass` (kg);
-`budget_condensation` (kg, net cond/evap);
-`budget_dgm_delta_T` (K, sum of per-droplet ΔT from DGM);
-`budget_diffusion_delta_T` (K), `budget_diffusion_delta_WV` (kg/kg) — domain-sum change from diffusion (≈0 for LEM periodic);
-`budget_sidewall_delta_T` (K), `budget_sidewall_delta_WV` (kg/kg) — 0 unless sidewalls enabled;
-`budget_n_injected`, `budget_n_fellout`, `budget_n_coalesced` (counts, stored as double);
-`N_collisions`, `N_coalescences` (per-interval counts).
-Global attrs: namelist params as `PARAMETERS.N`, `MICROPHYSICS.write_trajectories`, etc. Bools as int (0/1). Machine paths excluded.
+### Chamber vs. Parcel Mode
 
-### Particle NetCDF (`{name}_particles.nc`)
+| Aspect | Chamber | Parcel |
+|--------|---------|--------|
+| **Turbulence** | ODT (`&TURBULENCE_ODT`) | LEM (`&TURBULENCE_LEM`) |
+| **Boundary conditions** | Dirichlet | Periodic |
+| **Scalar representation** | Dual: nondimensional + dimensional | Dimensional only |
+| **Time step** | Adaptive | Fixed |
+| **Forcing** | Temperature gradient (`Tdiff`) | Adiabatic ascent (`parcel_file`) |
+| **Particle init** | Injected over time (aerosol NC schedule) | Pre-loaded at init (`aerosol_concentration`) + Köhler equilibration |
+| **Particle fallout** | Gravitational removal | Periodic wrapping |
+| **`Tref`** | Bottom boundary T (°C→K) | Uniform initial T (°C→K) |
+| **`pres`** | Constant reference pressure | Initial pressure, evolves hydrostatically |
+| **`initial_RH`** | Ignored | Sets initial WV field (0–1) |
+| **`aerosol_concentration`** | Ignored | Number concentration (cm⁻³) |
+| **`parcel_file`** | Not used | Required for ascent rate |
+| **`Tdiff`** | Top-bottom ΔT | Not used |
+| **Entrainment** | Not used | Optional blob method (`do_entrainment`) |
+| **`pressure_limit`** | Not used | Stop simulation at target pressure (Pa) |
 
-CF contiguous ragged array. Dims: `record` (unlimited), `time_step` (unlimited).
-Per-record: particle_id, aerosol_id, gridcell, position, temperature, water_vapor, supersaturation, radius, solute_radius, activated, aerosol_category, n_collisions, n_coalescences, radius_before_coalescence.
-Per-time-step: time, row_sizes (`cf_role="ragged_row_sizes"`).
+## Runner Layout
+
+`CODTRunner.setup_run` creates `{base}/{sim_name}/run/` with params.nml, aerosol_input.nc. Output goes to `{base}/`.
+
+**Known issue (v0.5.x):** `collect()` and `CODTSimulation._discover_files` look for `DONE` instead of `{name}_DONE`. Needs updating.
+
+## Binary File Readers
 
 ### Eddy Binary (`{name}_eddies.bin`)
 
-Unformatted Fortran stream. Header: N(i4), H(f8), C2(f8), ZC2(f8), Tdiff(f8), Tref(f8). Per-eddy: M(i4), L(i4), time(f8). Raw grid indices for replay via `implement_eddy(L, M)`.
+Unformatted Fortran stream. Mode-aware header:
+1. `mode_flag` (i1): 0 = chamber, 1 = parcel
+2. `N` (i4), `H` (f8) — shared fields
+3. Mode-specific fields (f8 array):
+   - Chamber: C2, ZC2, Tdiff, Tref (4 values)
+   - Parcel: integral_length_scale, kolmogorov_length_scale, dissipation_rate (3 values)
+
+Per-eddy record: M(i4), L(i4), time(f8). Raw grid indices for replay via `implement_eddy(L, M)`.
 
 ```python
-dt_header = np.dtype([('N','<i4'),('H','<f8'),('C2','<f8'),('ZC2','<f8'),('Tdiff','<f8'),('Tref','<f8')])
+# Read header
+mode_flag = np.fromfile(f, dtype='<i1', count=1)[0]
+N, H = np.fromfile(f, dtype=[('N','<i4'),('H','<f8')], count=1)[0]
+if mode_flag == 0:  # chamber
+    hdr = np.fromfile(f, dtype='<f8', count=4)  # C2, ZC2, Tdiff, Tref
+else:  # parcel
+    hdr = np.fromfile(f, dtype='<f8', count=3)  # L_int, eta, epsilon
 dt_eddy = np.dtype([('M','<i4'),('L','<i4'),('time','<f8')])
 ```
 
@@ -82,24 +99,12 @@ dt_header = np.dtype([('N','<i4'),('H','<f8'),('domain_width','<f8'),('volume_sc
 dt_record = np.dtype([('id_keep','<i4'),('id_kill','<i4'),('r_keep','<f8'),('r_kill','<f8'),('r_after','<f8'),('position','<f8'),('time','<f8')])
 ```
 
-### Aerosol Input (`aerosol_input.nc`, schema `CODT_aerosol_input_v1`)
+## Merged
 
-Dims: aerosol_type, edge (N bins+1), bin (N bins), time (injection steps).
-Vars: n_ions, molar_mass, solute_density, edge_radii (nm), category, cumulative_frequency (time,bin in Python -> bin,time in Fortran), injection_time, injection_rate.
-Attrs: `conventions="CODT_aerosol_input_v1"`, `aerosol_name`.
-
-### Bin Data (`bin_data.txt`)
-
-Header "N Bin-Edges", int count, then one float per line (microns).
-
-## Runner Layout
-
-`CODTRunner.setup_run` creates `{base}/{sim_name}/run/` with params.nml, aerosol_input.nc, bin_data.txt. Output goes to `{base}/{sim_name}/`.
-
-## In Progress
-
-- **LEM** (`implement-LEM`): merged (PR #11). `simulation_mode='parcel'` with periodic BCs, periodic triplet map, -5/3 eddy selection.
-- **Collision-coalescence** (`coll-coal`): merged (PR #13). Event-driven 1D CC with Hall/Long/unity kernels. New namelist params in `&MICROPHYSICS`.
+- **v0.5.x**: Flat output directory (no auto-subdirectory), relative paths, removed input file copies, `{name}_DONE` marker.
+- **v0.4.0**: Version embedding (`code_version`, `git_commit` in output NC), radiation module, DGM Rosenbrock solver, parcel entrainment framework, pressure_limit.
+- **LEM** (PR #11): `simulation_mode='parcel'` with periodic BCs, periodic triplet map, -5/3 eddy selection.
+- **Collision-coalescence** (PR #13): Event-driven 1D CC with Hall/Long/unity kernels.
 
 ## Remaining Work
 

@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from codt_tools.config import BinData, CODTConfig, InjectionData, Namelist
+from codt_tools.config import CODTConfig, InjectionData, Namelist
 
 
 # ======================================================================
@@ -23,7 +23,6 @@ class TestCODTConfigInit:
         assert cfg.name == "default_sim"
         assert isinstance(cfg.params, Namelist)
         assert isinstance(cfg.injection, InjectionData)
-        assert isinstance(cfg.bins, BinData)
 
     def test_name_property(self) -> None:
         cfg = CODTConfig()
@@ -41,7 +40,7 @@ class TestCODTConfigInit:
         assert reloaded.name == "reload_test"
         assert reloaded.params.get("tref") == 25.0
         assert reloaded.injection.aerosol_name == "NaCl"
-        assert reloaded.bins.n_edges == 201
+        assert len(reloaded.injection.dsd_bin_edges) == 201
 
     def test_from_namelist_missing_data_files(self, tmp_path: Path) -> None:
         """Loading from namelist alone falls back to defaults for data."""
@@ -53,7 +52,6 @@ class TestCODTConfigInit:
         assert cfg.name == "nml_only"
         # Should fall back to defaults (not crash)
         assert isinstance(cfg.injection, InjectionData)
-        assert isinstance(cfg.bins, BinData)
 
 
 # ======================================================================
@@ -81,8 +79,8 @@ class TestCODTConfigSetters:
         cfg = CODTConfig()
         new_edges = np.linspace(0.1, 50.0, 101)
         cfg.set_bins(new_edges)
-        assert cfg.bins.n_edges == 101
-        np.testing.assert_allclose(cfg.bins.edges, new_edges)
+        assert len(cfg.injection.dsd_bin_edges) == 101
+        np.testing.assert_allclose(cfg.injection.dsd_bin_edges, new_edges)
 
     def test_set_bad_param_raises(self) -> None:
         cfg = CODTConfig()
@@ -131,7 +129,6 @@ class TestCODTConfigDotAccess:
         cfg = CODTConfig()
         assert isinstance(cfg.params, Namelist)
         assert isinstance(cfg.injection, InjectionData)
-        assert isinstance(cfg.bins, BinData)
 
     def test_dir_includes_params(self) -> None:
         cfg = CODTConfig()
@@ -157,7 +154,6 @@ class TestCODTConfigWrite:
 
         assert (tmp_path / "run" / "params.nml").is_file()
         assert (tmp_path / "run" / "aerosol_input.nc").is_file()
-        assert (tmp_path / "run" / "bin_data.txt").is_file()
 
     def test_creates_directory(self, tmp_path: Path) -> None:
         target = tmp_path / "deep" / "nested" / "dir"
@@ -172,7 +168,6 @@ class TestCODTConfigWrite:
 
         reloaded = Namelist(tmp_path / "params.nml")
         assert reloaded.get("aerosol_file") == "aerosol_input.nc"
-        assert reloaded.get("bin_data_file") == "bin_data.txt"
 
     def test_roundtrip(self, tmp_path: Path) -> None:
         cfg = CODTConfig()
@@ -187,6 +182,47 @@ class TestCODTConfigWrite:
         np.testing.assert_allclose(
             reloaded.injection.injection_rate, [1.0e5]
         )
+
+    def test_chamber_excludes_parcel_groups(self, tmp_path: Path) -> None:
+        cfg = CODTConfig()
+        cfg.set(simulation_mode="chamber")
+        cfg.write(tmp_path)
+
+        import f90nml
+        nml = f90nml.read(tmp_path / "params.nml")
+        assert "turbulence_odt" in nml
+        assert "turbulence_lem" not in nml
+        assert "parcel" not in nml
+
+    def test_parcel_excludes_chamber_groups(self, tmp_path: Path) -> None:
+        cfg = CODTConfig()
+        cfg.set(simulation_mode="parcel")
+        cfg.write(tmp_path)
+
+        import f90nml
+        nml = f90nml.read(tmp_path / "params.nml")
+        assert "turbulence_lem" in nml
+        assert "parcel" in nml
+        assert "turbulence_odt" not in nml
+        assert "specialeffects" not in nml
+
+    def test_radiation_excluded_when_disabled(self, tmp_path: Path) -> None:
+        cfg = CODTConfig()
+        cfg.set(do_radiation=False)
+        cfg.write(tmp_path)
+
+        import f90nml
+        nml = f90nml.read(tmp_path / "params.nml")
+        assert "radiation" not in nml
+
+    def test_radiation_included_when_enabled(self, tmp_path: Path) -> None:
+        cfg = CODTConfig()
+        cfg.set(do_radiation=True)
+        cfg.write(tmp_path)
+
+        import f90nml
+        nml = f90nml.read(tmp_path / "params.nml")
+        assert "radiation" in nml
 
 
 # ======================================================================
@@ -226,9 +262,57 @@ class TestCODTConfigCopy:
 class TestCODTConfigValidate:
     """Tests for validate()."""
 
-    def test_valid_config_passes(self) -> None:
+    def test_valid_chamber_passes(self) -> None:
         cfg = CODTConfig()
         cfg.validate()  # should not raise
+
+    def test_valid_parcel_passes(self) -> None:
+        cfg = CODTConfig()
+        cfg.set(simulation_mode="parcel", parcel_file="parcel_input.nc")
+        cfg.validate()
+
+    def test_chamber_tdiff_zero_fails(self) -> None:
+        cfg = CODTConfig()
+        cfg.set(tdiff=0.0)
+        with pytest.raises(ValueError, match="tdiff"):
+            cfg.validate()
+
+    def test_parcel_no_file_fails(self) -> None:
+        cfg = CODTConfig()
+        cfg.set(simulation_mode="parcel")
+        with pytest.raises(ValueError, match="parcel_file"):
+            cfg.validate()
+
+    def test_parcel_bad_rh_fails(self) -> None:
+        cfg = CODTConfig()
+        cfg.set(simulation_mode="parcel", parcel_file="p.nc", initial_rh=1.5)
+        with pytest.raises(ValueError, match="initial_rh"):
+            cfg.validate()
+
+    def test_parcel_entrainment_needs_env(self) -> None:
+        cfg = CODTConfig()
+        cfg.set(simulation_mode="parcel", parcel_file="p.nc",
+                do_entrainment=True)
+        with pytest.raises(ValueError, match="environmental sounding"):
+            cfg.validate()
+
+    def test_parcel_entrainment_with_env_passes(self) -> None:
+        cfg = CODTConfig()
+        cfg.set(simulation_mode="parcel", parcel_file="p.nc",
+                do_entrainment=True)
+        cfg.parcel.set_env_profile(
+            pressure=[100000.0, 80000.0],
+            temperature=[300.0, 285.0],
+            RH=[0.8, 0.5],
+        )
+        cfg.validate()
+
+    def test_parcel_first_time_nonzero_fails(self) -> None:
+        cfg = CODTConfig()
+        cfg.set(simulation_mode="parcel", parcel_file="p.nc")
+        cfg.set_parcel(time=[10.0, 300.0], velocity=[1.0, 0.5])
+        with pytest.raises(ValueError, match="First parcel segment time"):
+            cfg.validate()
 
     def test_bad_trajectory_window(self) -> None:
         cfg = CODTConfig()
@@ -338,8 +422,8 @@ class TestCODTConfigFromSimulation:
     def test_recovers_bin_edges(self, sim_dir: Path) -> None:
         cfg = CODTConfig.from_simulation(sim_dir)
         # conftest creates 11 bin edges (n_bins=10)
-        assert cfg.bins.n_edges == 11
-        assert cfg.bins.edges[0] > 0
+        assert len(cfg.injection.dsd_bin_edges) == 11
+        assert cfg.injection.dsd_bin_edges[0] > 0
 
     def test_recovers_aerosol(self, sim_dir: Path) -> None:
         # Write an aerosol_input.nc into the sim directory
@@ -368,5 +452,4 @@ class TestCODTConfigFromSimulation:
         cfg2 = CODTConfig(out / "params.nml")
         assert cfg2.params.get("tref") == 25.0
         assert cfg2.name == "new_run"
-        assert (out / "bin_data.txt").is_file()
         assert (out / "aerosol_input.nc").is_file()

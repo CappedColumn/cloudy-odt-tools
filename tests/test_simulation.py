@@ -47,7 +47,7 @@ class TestMetadata:
         assert sim.completed is True
 
     def test_not_completed(self, sim_dir):
-        (sim_dir / "DONE").unlink()
+        (sim_dir / "test_sim_DONE").unlink()
         sim = CODTSimulation(sim_dir)
         assert sim.completed is False
 

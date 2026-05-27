@@ -76,7 +76,6 @@ class CODTRunner:
                 run/
                     params.nml
                     aerosol_input.nc
-                    bin_data.txt
 
         The namelist ``output_directory`` is set to ``base_output_dir``
         (absolute) so model output lands in
@@ -319,7 +318,7 @@ class CODTRunner:
         results = []
         for name in sim_names:
             sim_dir = self.base_output_dir / name
-            done_marker = sim_dir / "DONE"
+            done_marker = sim_dir / f"{name}_DONE"
             if not done_marker.is_file():
                 warnings.warn(
                     f"Simulation '{name}' has no DONE marker at "

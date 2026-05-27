@@ -45,6 +45,7 @@ def read_aerosol(path: Union[str, Path]) -> dict[str, Any]:
         - ``cumulative_frequency`` : np.ndarray, shape (n_times, n_bins)
         - ``injection_time`` : np.ndarray, shape (n_times,), seconds
         - ``injection_rate`` : np.ndarray, shape (n_times,), m⁻³ s⁻¹
+        - ``dsd_bin_edges`` : np.ndarray, shape (n_dsd_edges,), microns
 
     Raises
     ------
@@ -76,6 +77,7 @@ def read_aerosol(path: Union[str, Path]) -> dict[str, Any]:
             "cumulative_frequency": ds["cumulative_frequency"][:].data.copy(),
             "injection_time": ds["injection_time"][:].data.copy(),
             "injection_rate": ds["injection_rate"][:].data.copy(),
+            "dsd_bin_edges": ds["dsd_bin_edges"][:].data.copy(),
         }
 
     return data
@@ -114,11 +116,13 @@ def write_aerosol(path: Union[str, Path], data: dict[str, Any]) -> None:
     injection_rate = np.atleast_1d(
         np.asarray(data["injection_rate"], dtype=np.float64)
     )
+    dsd_bin_edges = np.asarray(data["dsd_bin_edges"], dtype=np.float64)
 
     n_types = len(n_ions)
     n_edges = len(edge_radii)
     n_bins = len(category)
     n_times = len(injection_time)
+    n_dsd_edges = len(dsd_bin_edges)
 
     with nc.Dataset(path, "w", format="NETCDF4") as ds:
         # Global attributes
@@ -130,6 +134,7 @@ def write_aerosol(path: Union[str, Path], data: dict[str, Any]) -> None:
         ds.createDimension("edge", n_edges)
         ds.createDimension("bin", n_bins)
         ds.createDimension("time", n_times)
+        ds.createDimension("dsd_edge", n_dsd_edges)
 
         # Per-type variables
         v = ds.createVariable("n_ions", "i4", ("aerosol_type",))
@@ -162,3 +167,7 @@ def write_aerosol(path: Union[str, Path], data: dict[str, Any]) -> None:
         v = ds.createVariable("injection_rate", "f8", ("time",))
         v.units = "m-3 s-1"
         v[:] = injection_rate
+
+        v = ds.createVariable("dsd_bin_edges", "f8", ("dsd_edge",))
+        v.units = "um"
+        v[:] = dsd_bin_edges

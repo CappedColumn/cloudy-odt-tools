@@ -41,7 +41,6 @@ class TestSetupRun:
         assert sim_dir.is_dir()
         assert (sim_dir / "run" / "params.nml").is_file()
         assert (sim_dir / "run" / "aerosol_input.nc").is_file()
-        assert (sim_dir / "run" / "bin_data.txt").is_file()
 
     def test_sim_dir_path(
         self, runner: CODTRunner, config: CODTConfig
@@ -66,7 +65,6 @@ class TestSetupRun:
         runner.setup_run(config)
 
         assert config.params.get("aerosol_file") == "aerosol_input.nc"
-        assert config.params.get("bin_data_file") == "bin_data.txt"
 
     def test_setup_runs_batch(self, runner: CODTRunner) -> None:
         configs = []
