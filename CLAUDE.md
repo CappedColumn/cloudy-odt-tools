@@ -108,7 +108,6 @@ dt_record = np.dtype([('id_keep','<i4'),('id_kill','<i4'),('r_keep','<f8'),('r_k
 
 ## Remaining Work
 
-- Eddy binary reader for `_eddies.bin`
 - Snakemake example Snakefile
 - `sim.budget_totals()` cumsum helper
 - Budget closure check (inject - fallout + condensation ≈ ΔLWC)

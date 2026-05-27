@@ -1158,6 +1158,75 @@ class CODTSimulation:
         return {"header": header, "events": events}
 
     # ------------------------------------------------------------------
+    # Eddy binary data
+    # ------------------------------------------------------------------
+
+    def has_eddies(self) -> bool:
+        """Whether eddy binary data is available."""
+        return self._eddies_path is not None
+
+    def load_eddies(self) -> dict[str, np.ndarray | dict]:
+        """Load eddy events from ``{name}_eddies.bin``.
+
+        Returns
+        -------
+        dict
+            ``"header"`` — dict with ``mode`` (``"chamber"`` or
+            ``"parcel"``), ``N``, ``H``, and mode-specific parameters:
+            chamber has ``C2``, ``ZC2``, ``Tdiff``, ``Tref``; parcel
+            has ``integral_length_scale``, ``kolmogorov_length_scale``,
+            ``dissipation_rate``.
+
+            ``"events"`` — structured array with ``M``, ``L``, ``time``.
+
+        Raises
+        ------
+        FileNotFoundError
+            If no ``_eddies.bin`` file was found.
+        """
+        if self._eddies_path is None:
+            raise FileNotFoundError(
+                f"No eddy file found for '{self.name}'. "
+                f"Expected: {self.path / f'{self.name}_eddies.bin'}"
+            )
+
+        raw = np.fromfile(self._eddies_path, dtype=np.uint8)
+        offset = 0
+
+        mode_flag = np.frombuffer(raw[offset:offset + 1], dtype='<i1')[0]
+        offset += 1
+
+        shared = np.frombuffer(
+            raw[offset:offset + 12],
+            dtype=np.dtype([('N', '<i4'), ('H', '<f8')]),
+        )
+        offset += 12
+        N = int(shared['N'][0])
+        H = float(shared['H'][0])
+
+        if mode_flag == 0:
+            vals = np.frombuffer(raw[offset:offset + 32], dtype='<f8')
+            offset += 32
+            header = {
+                "mode": "chamber", "N": N, "H": H,
+                "C2": float(vals[0]), "ZC2": float(vals[1]),
+                "Tdiff": float(vals[2]), "Tref": float(vals[3]),
+            }
+        else:
+            vals = np.frombuffer(raw[offset:offset + 24], dtype='<f8')
+            offset += 24
+            header = {
+                "mode": "parcel", "N": N, "H": H,
+                "integral_length_scale": float(vals[0]),
+                "kolmogorov_length_scale": float(vals[1]),
+                "dissipation_rate": float(vals[2]),
+            }
+
+        dt_eddy = np.dtype([('M', '<i4'), ('L', '<i4'), ('time', '<f8')])
+        events = np.frombuffer(raw[offset:], dtype=dt_eddy)
+        return {"header": header, "events": events}
+
+    # ------------------------------------------------------------------
     # Multi-simulation comparison
     # ------------------------------------------------------------------
 
@@ -1418,6 +1487,11 @@ class CODTSimulation:
                     total_coal = int(self._ds["N_coalescences"].values.sum())
                     print(f"  {'total collisions':25s} = {total_coll}")
                     print(f"  {'total coalescences':25s} = {total_coal}")
+
+            if self.has_eddies():
+                eddies = self.load_eddies()
+                print()
+                print(f"Eddies:      {len(eddies['events'])} events")
 
     def __repr__(self) -> str:
         parts = [f"'{self.name}'"]

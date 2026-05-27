@@ -434,3 +434,64 @@ class TestNoMicrophysics:
         sim = CODTSimulation(sim_dir_no_micro)
         p = sim.profile("T", t=50.0)
         assert p.dims == ("z",)
+
+
+# ── Eddy binary reader ─────────────────────────────────────────────
+
+def _write_eddy_bin(path, mode="chamber", n_events=5):
+    """Write a synthetic eddy binary for testing."""
+    buf = bytearray()
+    mode_flag = 0 if mode == "chamber" else 1
+    buf += np.array([mode_flag], dtype='<i1').tobytes()
+    buf += np.array([(100, 1.0)], dtype=[('N', '<i4'), ('H', '<f8')])[0].tobytes()
+    if mode == "chamber":
+        buf += np.array([1500.0, 1e5, 10.0, 293.15], dtype='<f8').tobytes()
+    else:
+        buf += np.array([0.1, 0.001, 0.01], dtype='<f8').tobytes()
+    for i in range(n_events):
+        buf += np.array([i + 5], dtype='<i4').tobytes()
+        buf += np.array([i + 2], dtype='<i4').tobytes()
+        buf += np.array([float(i) * 10.0], dtype='<f8').tobytes()
+    path.write_bytes(bytes(buf))
+
+
+class TestEddyReader:
+
+    def test_has_eddies_false(self, sim_dir):
+        sim = CODTSimulation(sim_dir)
+        assert not sim.has_eddies()
+
+    def test_load_eddies_raises_without_file(self, sim_dir):
+        sim = CODTSimulation(sim_dir)
+        with pytest.raises(FileNotFoundError):
+            sim.load_eddies()
+
+    def test_chamber_eddies(self, sim_dir):
+        _write_eddy_bin(sim_dir / "test_sim_eddies.bin", mode="chamber", n_events=3)
+        sim = CODTSimulation(sim_dir)
+        assert sim.has_eddies()
+        result = sim.load_eddies()
+        hdr = result["header"]
+        assert hdr["mode"] == "chamber"
+        assert hdr["N"] == 100
+        assert hdr["H"] == 1.0
+        assert hdr["C2"] == 1500.0
+        assert hdr["Tdiff"] == 10.0
+        assert len(result["events"]) == 3
+        assert result["events"][0]["M"] == 5
+        assert result["events"][0]["L"] == 2
+        assert result["events"][0]["time"] == 0.0
+
+    def test_parcel_eddies(self, tmp_path):
+        from conftest import _create_main_nc
+        _create_main_nc(tmp_path, name="parcel_test", mode="parcel")
+        (tmp_path / "parcel_test_DONE").write_text("2026-05-27\n")
+        _write_eddy_bin(tmp_path / "parcel_test_eddies.bin", mode="parcel", n_events=2)
+        sim = CODTSimulation(tmp_path)
+        result = sim.load_eddies()
+        hdr = result["header"]
+        assert hdr["mode"] == "parcel"
+        assert hdr["integral_length_scale"] == 0.1
+        assert hdr["kolmogorov_length_scale"] == 0.001
+        assert hdr["dissipation_rate"] == 0.01
+        assert len(result["events"]) == 2
