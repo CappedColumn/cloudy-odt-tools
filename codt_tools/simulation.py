@@ -160,11 +160,6 @@ class CODTSimulation:
         self._nc_path = nc_path
 
         # Optional associated files
-        nml_path = directory / f"{name}.nml"
-        self._nml_path: pathlib.Path | None = (
-            nml_path if nml_path.is_file() else None
-        )
-
         particles_path = directory / f"{name}_particles.nc"
         self._particles_path: pathlib.Path | None = (
             particles_path if particles_path.is_file() else None
@@ -195,9 +190,8 @@ class CODTSimulation:
         Parameters are stored as dot-prefixed global attributes
         (e.g. ``PARAMETERS.N``, ``MICROPHYSICS.write_trajectories``).
         Booleans are stored as integers (1 = true, 0 = false).
-        Falls back to the ``.nml`` file if no attributes are present.
+        Available in CODT v0.4+.
         """
-        # Try netCDF global attributes first
         nc_attrs = dict(self._ds.attrs)
         param_attrs = {
             k: v for k, v in nc_attrs.items()
@@ -210,8 +204,6 @@ class CODTSimulation:
 
         if param_attrs:
             self.params = self._params_from_nc_attrs(param_attrs)
-        elif self._nml_path is not None:
-            self.params = Namelist(self._nml_path)
         else:
             self.params = None
 
@@ -1355,7 +1347,7 @@ class CODTSimulation:
         print(f"Simulation:  {self.name}")
         print(f"Directory:   {self.path}")
         print(f"NC file:     {self._nc_path.name}")
-        print(f"NML file:    {self._nml_path.name if self._nml_path else 'not found'}")
+        print(f"Version:     {self._ds.attrs.get('code_version', 'unknown')}")
         print(f"Completed:   {self.completed}")
         print()
 
