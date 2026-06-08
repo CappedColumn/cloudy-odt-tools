@@ -62,6 +62,26 @@ class CODTRunner:
         self.account: str = account
         self.partition: str = partition
         self.cores_per_node: int = cores_per_node
+        self.codt_version: str | None = self._query_version()
+
+    # ------------------------------------------------------------------
+    # Version
+    # ------------------------------------------------------------------
+
+    def _query_version(self) -> str | None:
+        """Run ``codt --version`` and return the version string, or None."""
+        if not self.executable.is_file():
+            return None
+        try:
+            proc = subprocess.run(
+                [str(self.executable), "--version"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                return proc.stdout.strip()
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        return None
 
     # ------------------------------------------------------------------
     # Directory setup
@@ -373,8 +393,10 @@ class CODTRunner:
     # ------------------------------------------------------------------
 
     def __repr__(self) -> str:
+        version = f", version='{self.codt_version}'" if self.codt_version else ""
         return (
             f"CODTRunner(executable='{self.executable}', "
             f"base_output_dir='{self.base_output_dir}', "
-            f"account='{self.account}', partition='{self.partition}')"
+            f"account='{self.account}', partition='{self.partition}'"
+            f"{version})"
         )

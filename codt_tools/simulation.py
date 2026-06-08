@@ -38,6 +38,10 @@ from codt_tools.trajectory_io import (
 )
 
 
+# CODT's hardcoded implied domain width (globals.f90: domain_width = 0.001 m),
+# used with volume_scaling and H to recover the effective 3-D domain volume.
+_DOMAIN_WIDTH_M: float = 0.001
+
 # netCDF variable name -> (long_name, dims_hint)
 # dims_hint: "tz" = (time, z), "t" = (time,), "tr" = (time, radius)
 _FIELD_REGISTRY: dict[str, str] = {
@@ -65,6 +69,13 @@ _FIELD_REGISTRY: dict[str, str] = {
     "budget_n_injected": "t",
     "budget_n_fellout": "t",
     "budget_n_coalesced": "t",
+    # Entrainment budget — only present when do_entrainment (parcel mode).
+    "budget_detrain_liquid_mass": "t",
+    "budget_detrain_solute_mass": "t",
+    "budget_entrain_liquid_mass": "t",
+    "budget_entrain_solute_mass": "t",
+    "budget_n_detrained": "t",
+    "budget_n_entrained": "t",
     "N_collisions": "t",
     "N_coalescences": "t",
     # Parcel mode
@@ -1129,7 +1140,10 @@ class CODTSimulation:
             ``"header"`` — structured array with N, H, domain_width,
             volume_scaling.
             ``"events"`` — structured array with id_keep, id_kill,
-            r_keep, r_kill, r_after, position, time.
+            r_keep, r_kill, r_after, position, time, coalesced.
+            ``coalesced`` is 1 if the droplets merged (``r_after`` is the
+            merged radius) and 0 for a collision without coalescence
+            (``r_after = 0``).
 
         Raises
         ------
@@ -1149,7 +1163,7 @@ class CODTSimulation:
         dt_event = np.dtype([
             ('id_keep', '<i4'), ('id_kill', '<i4'),
             ('r_keep', '<f8'), ('r_kill', '<f8'), ('r_after', '<f8'),
-            ('position', '<f8'), ('time', '<f8'),
+            ('position', '<f8'), ('time', '<f8'), ('coalesced', '<i1'),
         ])
 
         raw = np.fromfile(self._collisions_path, dtype=np.uint8)
@@ -1225,6 +1239,123 @@ class CODTSimulation:
         dt_eddy = np.dtype([('M', '<i4'), ('L', '<i4'), ('time', '<f8')])
         events = np.frombuffer(raw[offset:], dtype=dt_eddy)
         return {"header": header, "events": events}
+
+    # ------------------------------------------------------------------
+    # Budgets
+    # ------------------------------------------------------------------
+
+    def domain_volume(self) -> float:
+        """Effective 3-D domain volume in m**3.
+
+        Mirrors CODT's ``domain_volume = volume_scaling * domain_width**2 * H``
+        (``initialize.f90``) with the hardcoded ``domain_width = 0.001 m``
+        from ``globals.f90``. Used to convert column-integrated quantities
+        (e.g. ``LWC``) to the absolute masses the ``budget_*`` variables track.
+        """
+        vs = self._param("volume_scaling")
+        h = self._param("h")
+        if vs is None or h is None:
+            raise ValueError(
+                "domain_volume needs volume_scaling and H from the namelist; "
+                f"namelist not available for '{self.name}'."
+            )
+        return float(vs) * _DOMAIN_WIDTH_M ** 2 * float(h)
+
+    def budget_totals(self, cumulative: bool = True) -> xr.Dataset:
+        """Return the budget diagnostic variables as a Dataset.
+
+        CODT writes each ``budget_*`` variable as the amount accumulated
+        over a single write interval. This gathers every ``budget_*``
+        variable present in the output and, by default, returns their
+        running cumulative totals over time (``cumulative=True``); pass
+        ``cumulative=False`` for the raw per-interval increments.
+
+        Raises
+        ------
+        ValueError
+            If the output has no budget variables (microphysics was off).
+        """
+        names = [str(v) for v in self._ds.data_vars
+                 if str(v).startswith("budget_")]
+        if not names:
+            raise ValueError(
+                f"No budget variables in '{self.name}'. "
+                f"Budgets require do_microphysics."
+            )
+        ds = self._ds[names]
+        return ds.cumsum("time") if cumulative else ds
+
+    def budget_closure(self) -> dict[str, float]:
+        """Liquid-water mass closure check.
+
+        Compares the cumulative liquid-water mass change implied by the
+        budget source/sink terms ::
+
+            sources_net = inject + condensation - fallout (+ entrain - detrain)
+
+        against the change derived from ``LWC`` over the run ::
+
+            m_liquid(t) = LWC(t) [g/m**3] * domain_volume / 1000   [kg]
+
+        All ``budget_*`` masses are in kg. Coalescence conserves liquid
+        mass, so it needs no term. Returns the cumulative terms, the
+        LWC-derived ``delta_lwc_mass``, the ``residual`` (sources_net minus
+        delta), and ``relative_residual`` (residual normalised by the total
+        injected liquid mass). A small relative residual means the tracked
+        sources and sinks account for the liquid water; this is a
+        diagnostic, not a pass/fail assertion.
+
+        Note: ``LWC`` is written in g/m**3 (see CODT output-unit notes), and
+        ``domain_volume`` assumes the hardcoded ``domain_width`` — see
+        :meth:`domain_volume`.
+
+        Raises
+        ------
+        ValueError
+            If the required budget/LWC variables are absent.
+        """
+        required = [
+            "budget_inject_liquid_mass",
+            "budget_fallout_liquid_mass",
+            "budget_condensation",
+            "LWC",
+        ]
+        missing = [v for v in required if v not in self._ds.data_vars]
+        if missing:
+            raise ValueError(
+                f"Budget closure needs {missing}, not present in "
+                f"'{self.name}'. Was do_microphysics enabled?"
+            )
+
+        def total(name: str) -> float:
+            if name not in self._ds.data_vars:
+                return 0.0
+            return float(np.asarray(self._ds[name].values).sum())
+
+        inject = total("budget_inject_liquid_mass")
+        fallout = total("budget_fallout_liquid_mass")
+        condensation = total("budget_condensation")
+        entrain = total("budget_entrain_liquid_mass")
+        detrain = total("budget_detrain_liquid_mass")
+        sources_net = inject - fallout + condensation + entrain - detrain
+
+        lwc = np.asarray(self._ds["LWC"].values)
+        m_liquid = lwc * self.domain_volume() / 1000.0  # g/m**3 -> kg
+        delta_lwc_mass = float(m_liquid[-1] - m_liquid[0])
+
+        residual = sources_net - delta_lwc_mass
+        scale = abs(inject) or abs(delta_lwc_mass) or 1.0
+        return {
+            "inject_liquid_mass": inject,
+            "fallout_liquid_mass": fallout,
+            "condensation": condensation,
+            "entrain_liquid_mass": entrain,
+            "detrain_liquid_mass": detrain,
+            "sources_net": sources_net,
+            "delta_lwc_mass": delta_lwc_mass,
+            "residual": residual,
+            "relative_residual": residual / scale,
+        }
 
     # ------------------------------------------------------------------
     # Multi-simulation comparison

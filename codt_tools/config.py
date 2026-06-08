@@ -54,14 +54,20 @@ class Namelist:
     #   REAL(8)  -> float
     #   LOGICAL  -> bool
     #   CHARACTER -> str
+    # Defaults mirror CODT's *code* defaults (docs/input_parameters.md). Each
+    # internal group maps directly to the Fortran namelist of the same name,
+    # so a parameter MUST live in the group CODT reads it from — putting it
+    # elsewhere makes CODT reject the namelist ("Invalid parameter in &GROUP").
+    # Parameters CODT marks "required" have no code default; the placeholders
+    # here (names, paths, write cadence) just keep the config usable.
     _DEFAULTS: dict[str, dict[str, Any]] = {
         "parameters": {
             "n":                  2000,
-            "tmax":               3600.0,
-            "tref":               21.5,
+            "tmax":               100.0,
+            "tref":               20.0,
             "pres":               1.0e5,
             "h":                  1.0,
-            "volume_scaling":     100,
+            "volume_scaling":     10.0,
             "same_random":        False,
             "simulation_name":    "default_sim",
             "output_directory":   "./output",
@@ -73,36 +79,38 @@ class Namelist:
             "do_microphysics":    True,
             "do_special_effects": False,
             "do_radiation":       False,
+            "do_entrainment":     False,
             "simulation_mode":    "chamber",
-            "pressure_limit":     0.0,
         },
         "parcel": {
             "parcel_file":          "",
             "initial_rh":           1.0,
-            "do_entrainment":       False,
+            "pressure_limit":       0.0,
+        },
+        "entrainment": {
             "ent_rate":             2.0,
             "n_blob":               1,
             "psigma":               0.1,
             "random_entrainment":   True,
         },
         "turbulence_odt": {
-            "tdiff":              3.0,
+            "tdiff":              10.0,
             "lmin":               6,
             "lprob":              18,
             "max_accept_prob":    0.1,
-            "c2":                 1500.0,
+            "c2":                 1.5e3,
             "zc2":                1.0e5,
         },
         "turbulence_lem": {
-            "integral_length_scale":    0.5,
+            "integral_length_scale":    0.01,
             "kolmogorov_length_scale":  0.001,
             "dissipation_rate":         0.01,
         },
         "microphysics": {
             "aerosol_file":                    "aerosol_input.nc",
             "aerosol_concentration":           0.0,
-            "init_drop_each_gridpoint":        0,
-            "expected_ndrops_per_gridpoint":   3.0,
+            "init_drop_each_gridpoint":        False,
+            "expected_ndrops_per_gridpoint":   1.0,
             "initial_wet_radius":              1.5,
             "write_trajectories":              False,
             "trajectory_start":                0.0,
@@ -124,22 +132,22 @@ class Namelist:
             "rh_sw":                0.96,
             "p_sw":                 7.0,
             "do_random_fallout":    False,
-            "random_fallout_rate":  0.33333,
+            "random_fallout_rate":  1.0,
         },
         "radiation": {
-            "radiation_method":     "two_stream",
+            "radiation_method":     "1d",
             "mie_data_file":        "",
             "eps_top":              1.0,
             "eps_bot":              1.0,
-            "sky_temp":             260.0,
+            "sky_temp":             263.15,
             "sky_cooling_flag":     False,
-            "rad_call_interval":    1.0,
-            "nphotons":             1000,
-            "nbins":                50,
-            "lx_rad":               0.1,
-            "ly_rad":               0.1,
-            "t_side":               290.0,
-            "max_droplets_per_cell": 100,
+            "rad_call_interval":    0.0,
+            "nphotons":             700000,
+            "nbins":                30,
+            "lx_rad":               2.0,
+            "ly_rad":               2.0,
+            "t_side":               293.15,
+            "max_droplets_per_cell": 20,
         },
     }
 
@@ -338,15 +346,17 @@ class Namelist:
 
     # Groups that are only relevant to one simulation mode.
     _CHAMBER_ONLY_GROUPS: set[str] = {"turbulence_odt", "specialeffects"}
-    _PARCEL_ONLY_GROUPS: set[str] = {"turbulence_lem", "parcel"}
+    _PARCEL_ONLY_GROUPS: set[str] = {"turbulence_lem", "parcel", "entrainment"}
 
     def _groups_for_write(self) -> dict[str, dict[str, Any]]:
-        """Return namelist groups filtered by simulation mode.
+        """Return namelist groups filtered by simulation mode and switches.
 
-        Chamber mode excludes ``turbulence_lem`` and ``parcel``.
-        Parcel mode excludes ``turbulence_odt`` and ``specialeffects``.
-        The ``radiation`` group is only included if ``do_radiation`` is
-        enabled.
+        Chamber mode excludes ``turbulence_lem``, ``parcel``, and
+        ``entrainment``. Parcel mode excludes ``turbulence_odt`` and
+        ``specialeffects``. The ``radiation`` group is only included when
+        ``do_radiation`` is enabled, and ``entrainment`` only when
+        ``do_entrainment`` is enabled (CODT reads each group only when its
+        switch is on).
         """
         try:
             mode = self.get("simulation_mode")
@@ -354,16 +364,23 @@ class Namelist:
             mode = "chamber"
 
         if mode == "parcel":
-            skip = self._CHAMBER_ONLY_GROUPS
+            skip = set(self._CHAMBER_ONLY_GROUPS)
         else:
-            skip = self._PARCEL_ONLY_GROUPS
+            skip = set(self._PARCEL_ONLY_GROUPS)
 
         try:
             do_radiation = self.get("do_radiation")
         except KeyError:
             do_radiation = False
         if not do_radiation:
-            skip = skip | {"radiation"}
+            skip.add("radiation")
+
+        try:
+            do_entrainment = self.get("do_entrainment")
+        except KeyError:
+            do_entrainment = False
+        if not do_entrainment:
+            skip.add("entrainment")
 
         return {g: p for g, p in self._data.items() if g not in skip}
 
@@ -1200,6 +1217,46 @@ class CODTConfig:
             If any consistency check fails.
         """
         mode = self.params.get("simulation_mode")
+
+        # -- Range checks --
+        if self.params.get("n") <= 0:
+            raise ValueError(f"N must be positive, got {self.params.get('n')}.")
+        if self.params.get("tmax") <= 0:
+            raise ValueError(f"tmax must be positive, got {self.params.get('tmax')}.")
+        if self.params.get("h") <= 0:
+            raise ValueError(f"H must be positive, got {self.params.get('h')}.")
+        if self.params.get("pres") <= 0:
+            raise ValueError(f"pres must be positive, got {self.params.get('pres')}.")
+        if self.params.get("volume_scaling") <= 0:
+            raise ValueError(
+                f"volume_scaling must be positive, got {self.params.get('volume_scaling')}."
+            )
+        if self.params.get("tref") <= -273.15:
+            raise ValueError(f"Tref must be > -273.15 C, got {self.params.get('tref')}.")
+        if mode not in ("chamber", "parcel"):
+            raise ValueError(
+                f"simulation_mode must be 'chamber' or 'parcel', got '{mode}'."
+            )
+
+        # -- Cross-namelist consistency warnings --
+        if self.params.get("do_radiation") and not self.params.get("do_microphysics"):
+            warnings.warn(
+                "do_radiation has no effect without do_microphysics.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if self.params.get("write_eddies") and not self.params.get("do_turbulence"):
+            warnings.warn(
+                "write_eddies has no effect without do_turbulence.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if self.params.get("do_entrainment") and mode == "chamber":
+            warnings.warn(
+                "do_entrainment is not yet implemented in chamber mode.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         # -- Mode-specific checks --
         if mode == "chamber":

@@ -495,3 +495,129 @@ class TestEddyReader:
         assert hdr["kolmogorov_length_scale"] == 0.001
         assert hdr["dissipation_rate"] == 0.01
         assert len(result["events"]) == 2
+
+
+# ── Collision binary reader ────────────────────────────────────────
+
+def _write_collision_bin(path, events):
+    """Write a synthetic collision binary. *events* is a list of
+    (id_keep, id_kill, r_keep, r_kill, r_after, position, time, coalesced).
+    """
+    buf = bytearray()
+    buf += np.array([(100, 1.0, 0.001, 13.0)],
+                    dtype=[('N', '<i4'), ('H', '<f8'),
+                           ('domain_width', '<f8'),
+                           ('volume_scaling', '<f8')])[0].tobytes()
+    for ev in events:
+        idk, idl, rk, rl, ra, pos, t, coal = ev
+        buf += np.array([idk], dtype='<i4').tobytes()
+        buf += np.array([idl], dtype='<i4').tobytes()
+        buf += np.array([rk, rl, ra, pos, t], dtype='<f8').tobytes()
+        buf += np.array([coal], dtype='<i1').tobytes()
+    path.write_bytes(bytes(buf))
+
+
+class TestCollisionReader:
+
+    def test_load_collisions_raises_without_file(self, sim_dir):
+        sim = CODTSimulation(sim_dir)
+        with pytest.raises(FileNotFoundError):
+            sim.load_collisions()
+
+    def test_coalesced_flag_roundtrips(self, sim_dir):
+        # One coalescence (flag=1, r_after set), one bounce (flag=0, r_after=0).
+        events = [
+            (7, 8, 5.0e-6, 4.0e-6, 6.0e-6, 0.5, 1.0, 1),
+            (3, 9, 2.0e-6, 1.0e-6, 0.0, 0.2, 2.0, 0),
+        ]
+        _write_collision_bin(sim_dir / "test_sim_collisions.bin", events)
+        sim = CODTSimulation(sim_dir)
+        result = sim.load_collisions()
+
+        hdr = result["header"]
+        assert hdr["N"][0] == 100
+        assert hdr["volume_scaling"][0] == 13.0
+
+        ev = result["events"]
+        # The trailing i1 byte must be read, so the record stride stays
+        # aligned and both events decode (a missing byte would mis-slice).
+        assert len(ev) == 2
+        assert "coalesced" in ev.dtype.names
+        assert ev["coalesced"][0] == 1
+        assert ev["coalesced"][1] == 0
+        assert ev["id_keep"][0] == 7
+        assert ev["id_kill"][1] == 9
+        assert ev["r_after"][0] == 6.0e-6
+        assert ev["time"][1] == 2.0
+
+
+# ── Budgets ────────────────────────────────────────────────────────
+
+def _create_budget_nc(path, name="test_sim"):
+    """Write a main NC with a closing liquid-water budget for tests."""
+    import netCDF4 as nc
+    nc_path = path / f"{name}.nc"
+    n_time = 4
+    times = np.arange(n_time, dtype=np.float64) * 10.0
+    vol = 13.0 * 0.001 ** 2 * 1.0  # volume_scaling * domain_width**2 * H
+
+    # Per-interval liquid mass changes (kg): inject + condensation - fallout.
+    inj = np.array([0.0, 2.0, 1.0, 0.0])
+    cond = np.array([0.0, 0.5, 0.5, 0.5])
+    fall = np.array([0.0, 0.0, 0.5, 1.0])
+    net_increment = inj + cond - fall          # liquid mass added each step
+    m_liquid = np.cumsum(net_increment)        # total liquid mass (kg)
+    lwc = m_liquid * 1000.0 / vol              # kg -> g/m**3
+
+    with nc.Dataset(nc_path, "w", format="NETCDF4") as ds:
+        ds.setncattr("PARAMETERS.volume_scaling", 13)
+        ds.setncattr("PARAMETERS.H", 1.0)
+        ds.setncattr("PARAMETERS.do_microphysics", 1)
+        ds.setncattr("PARAMETERS.simulation_mode", "chamber")
+        ds.createDimension("time", None)
+        ds.createDimension("z", 2)
+        v = ds.createVariable("time", "f8", ("time",)); v[:] = times
+        v = ds.createVariable("z", "f8", ("z",)); v[:] = [0.0, 1.0]
+        for vname, data in [
+            ("budget_inject_liquid_mass", inj),
+            ("budget_condensation", cond),
+            ("budget_fallout_liquid_mass", fall),
+            ("LWC", lwc),
+        ]:
+            v = ds.createVariable(vname, "f8", ("time",))
+            v[:] = data
+    (path / f"{name}_DONE").write_text("2026-06-08\n")
+    return path
+
+
+class TestBudgets:
+
+    def test_domain_volume(self, sim_dir):
+        sim = CODTSimulation(sim_dir)
+        # volume_scaling=13, H=1.0, domain_width=0.001
+        assert sim.domain_volume() == pytest.approx(13.0 * 0.001 ** 2 * 1.0)
+
+    def test_budget_totals_cumulative(self, tmp_path):
+        _create_budget_nc(tmp_path)
+        sim = CODTSimulation(tmp_path)
+        totals = sim.budget_totals(cumulative=True)
+        # cumulative inject = 0+2+1+0 = 3
+        assert float(totals["budget_inject_liquid_mass"][-1]) == pytest.approx(3.0)
+        # raw increments preserved when cumulative=False
+        raw = sim.budget_totals(cumulative=False)
+        assert float(raw["budget_inject_liquid_mass"][1]) == pytest.approx(2.0)
+
+    def test_budget_totals_requires_budgets(self, sim_dir_no_micro):
+        sim = CODTSimulation(sim_dir_no_micro)
+        with pytest.raises(ValueError, match="budget"):
+            sim.budget_totals()
+
+    def test_budget_closure_residual_near_zero(self, tmp_path):
+        _create_budget_nc(tmp_path)
+        sim = CODTSimulation(tmp_path)
+        result = sim.budget_closure()
+        # inject(3.0) - fallout(1.5) + condensation(1.5) = 3.0
+        assert result["sources_net"] == pytest.approx(3.0)
+        assert result["delta_lwc_mass"] == pytest.approx(3.0)
+        assert result["residual"] == pytest.approx(0.0, abs=1e-9)
+        assert abs(result["relative_residual"]) < 1e-6

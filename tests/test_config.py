@@ -103,7 +103,7 @@ class TestCODTConfigDotAccess:
 
     def test_get(self) -> None:
         cfg = CODTConfig()
-        assert cfg.tref == 21.5
+        assert cfg.tref == 20.0
         assert cfg.simulation_name == "default_sim"
         assert cfg.do_microphysics is True
 
@@ -214,6 +214,46 @@ class TestCODTConfigWrite:
         import f90nml
         nml = f90nml.read(tmp_path / "params.nml")
         assert "radiation" not in nml
+
+    def test_namelist_group_placement_matches_codt(self, tmp_path: Path) -> None:
+        """Params must land in the group CODT reads them from, else CODT
+        rejects the namelist with 'Invalid parameter in &GROUP'.
+
+        CODT v1.0: do_entrainment is read in &PARAMETERS, pressure_limit in
+        &PARCEL, and the entrainment params in a standalone &ENTRAINMENT.
+        """
+        cfg = CODTConfig()
+        cfg.set(simulation_mode="parcel", parcel_file="parcel.nc",
+                do_entrainment=True)
+        cfg.write(tmp_path)
+
+        import f90nml
+        nml = f90nml.read(tmp_path / "params.nml")
+        # do_entrainment in &PARAMETERS, not &PARCEL
+        assert "do_entrainment" in nml["parameters"]
+        assert "do_entrainment" not in nml["parcel"]
+        # pressure_limit in &PARCEL, not &PARAMETERS
+        assert "pressure_limit" in nml["parcel"]
+        assert "pressure_limit" not in nml["parameters"]
+        # entrainment params in standalone &ENTRAINMENT, not &PARCEL
+        assert "entrainment" in nml
+        assert "ent_rate" in nml["entrainment"]
+        assert "ent_rate" not in nml["parcel"]
+
+    def test_entrainment_excluded_when_disabled(self, tmp_path: Path) -> None:
+        cfg = CODTConfig()
+        cfg.set(simulation_mode="parcel", parcel_file="parcel.nc",
+                do_entrainment=False)
+        cfg.write(tmp_path)
+
+        import f90nml
+        nml = f90nml.read(tmp_path / "params.nml")
+        assert "entrainment" not in nml
+
+    def test_radiation_method_default_valid(self) -> None:
+        """CODT only accepts '1d' or '3d' for radiation_method."""
+        cfg = CODTConfig()
+        assert cfg.params.get("radiation_method") in ("1d", "3d")
 
     def test_radiation_included_when_enabled(self, tmp_path: Path) -> None:
         cfg = CODTConfig()
