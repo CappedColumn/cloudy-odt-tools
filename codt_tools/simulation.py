@@ -1270,6 +1270,11 @@ class CODTSimulation:
         running cumulative totals over time (``cumulative=True``); pass
         ``cumulative=False`` for the raw per-interval increments.
 
+        The kg-valued mass terms (``*_mass`` and ``budget_condensation``)
+        are converted to domain-mean concentrations in g/m**3, comparable
+        to ``LWC``, and the water-vapor terms (``*_WV``) from kg/kg to
+        g/kg; temperature (K) and count terms are returned as written.
+
         Raises
         ------
         ValueError
@@ -1282,32 +1287,43 @@ class CODTSimulation:
                 f"No budget variables in '{self.name}'. "
                 f"Budgets require do_microphysics."
             )
-        ds = self._ds[names]
-        return ds.cumsum("time") if cumulative else ds
+        ds = self._ds[names].copy()
+        kg_to_g_m3 = 1000.0 / self.domain_volume()
+        for name in names:
+            if name.endswith("_mass") or name == "budget_condensation":
+                factor, units = kg_to_g_m3, "g/m3"
+            elif name.endswith("_WV"):
+                factor, units = 1000.0, "g/kg"  # kg/kg -> g/kg
+            else:
+                continue
+            attrs = dict(ds[name].attrs)
+            attrs["units"] = units
+            ds[name] = ds[name] * factor
+            ds[name].attrs = attrs
+        return ds.cumsum("time", keep_attrs=True) if cumulative else ds
 
     def budget_closure(self) -> dict[str, float]:
         """Liquid-water mass closure check.
 
-        Compares the cumulative liquid-water mass change implied by the
+        Compares the cumulative liquid-water change implied by the
         budget source/sink terms ::
 
             sources_net = inject + condensation - fallout (+ entrain - detrain)
 
-        against the change derived from ``LWC`` over the run ::
+        against the change in ``LWC`` over the run (``delta_lwc_mass``).
 
-            m_liquid(t) = LWC(t) [g/m**3] * domain_volume / 1000   [kg]
-
-        All ``budget_*`` masses are in kg. Coalescence conserves liquid
-        mass, so it needs no term. Returns the cumulative terms, the
-        LWC-derived ``delta_lwc_mass``, the ``residual`` (sources_net minus
-        delta), and ``relative_residual`` (residual normalised by the total
-        injected liquid mass). A small relative residual means the tracked
+        All mass terms are reported as domain-mean concentrations in
+        g/m**3 — the same unit as ``LWC`` — by converting the kg-valued
+        ``budget_*`` variables with ``1000 / domain_volume``. Coalescence
+        conserves liquid mass, so it needs no term. Returns the cumulative
+        terms, the ``residual`` (sources_net minus delta), and
+        ``relative_residual`` (residual normalised by the largest budget
+        term, dimensionless). A small relative residual means the tracked
         sources and sinks account for the liquid water; this is a
         diagnostic, not a pass/fail assertion.
 
-        Note: ``LWC`` is written in g/m**3 (see CODT output-unit notes), and
-        ``domain_volume`` assumes the hardcoded ``domain_width`` — see
-        :meth:`domain_volume`.
+        Note: ``domain_volume`` assumes the hardcoded ``domain_width`` —
+        see :meth:`domain_volume`.
 
         Raises
         ------
@@ -1327,10 +1343,14 @@ class CODTSimulation:
                 f"'{self.name}'. Was do_microphysics enabled?"
             )
 
+        # budget_* variables are kg; report everything as domain-mean
+        # concentrations (g/m**3) so terms compare directly to LWC.
+        kg_to_g_m3 = 1000.0 / self.domain_volume()
+
         def total(name: str) -> float:
             if name not in self._ds.data_vars:
                 return 0.0
-            return float(np.asarray(self._ds[name].values).sum())
+            return float(np.asarray(self._ds[name].values).sum()) * kg_to_g_m3
 
         inject = total("budget_inject_liquid_mass")
         fallout = total("budget_fallout_liquid_mass")
@@ -1339,9 +1359,8 @@ class CODTSimulation:
         detrain = total("budget_detrain_liquid_mass")
         sources_net = inject - fallout + condensation + entrain - detrain
 
-        lwc = np.asarray(self._ds["LWC"].values)
-        m_liquid = lwc * self.domain_volume() / 1000.0  # g/m**3 -> kg
-        delta_lwc_mass = float(m_liquid[-1] - m_liquid[0])
+        lwc = np.asarray(self._ds["LWC"].values)  # already g/m**3
+        delta_lwc_mass = float(lwc[-1] - lwc[0])
 
         residual = sources_net - delta_lwc_mass
         # Normalize by the dominant budget term so a near-zero inject (e.g.

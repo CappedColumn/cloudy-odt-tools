@@ -144,6 +144,7 @@ Four step-by-step tutorials (chamber simple/advanced, parcel simple/advanced) fo
 
 - `codt_tools.__version__` added (`importlib.metadata`-based).
 - `budget_closure()` scale bug: was `abs(inject) or ...`, so parcel mode's near-zero-but-nonzero inject term inflated `relative_residual` (~8 for a perfectly closed budget). Now normalizes by the largest budget term.
+- `budget_closure()` and `budget_totals()` report mass terms (`*_mass`, `budget_condensation`) in g/m³ (domain-mean concentration, comparable to LWC) instead of the kg stored in the NC; `budget_totals()` also converts `*_WV` terms kg/kg → g/kg, fixes the `units` attrs accordingly, and leaves K / count terms as written. `relative_residual` unchanged (dimensionless).
 
 ## codt_tools v0.3.0 — CODT v1.0.0 compatibility pass
 

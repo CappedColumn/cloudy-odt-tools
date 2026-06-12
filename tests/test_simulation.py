@@ -582,6 +582,7 @@ def _create_budget_nc(path, name="test_sim"):
             ("budget_inject_liquid_mass", inj),
             ("budget_condensation", cond),
             ("budget_fallout_liquid_mass", fall),
+            ("budget_diffusion_delta_WV", np.full(n_time, 1e-4)),  # kg/kg
             ("LWC", lwc),
         ]:
             v = ds.createVariable(vname, "f8", ("time",))
@@ -601,11 +602,20 @@ class TestBudgets:
         _create_budget_nc(tmp_path)
         sim = CODTSimulation(tmp_path)
         totals = sim.budget_totals(cumulative=True)
-        # cumulative inject = 0+2+1+0 = 3
-        assert float(totals["budget_inject_liquid_mass"][-1]) == pytest.approx(3.0)
+        # Mass terms are converted kg -> g/m**3 of domain volume.
+        kg_to_g_m3 = 1000.0 / (13.0 * 0.001 ** 2 * 1.0)
+        # cumulative inject = 0+2+1+0 = 3 kg
+        assert float(totals["budget_inject_liquid_mass"][-1]) == pytest.approx(
+            3.0 * kg_to_g_m3)
+        assert totals["budget_inject_liquid_mass"].attrs["units"] == "g/m3"
+        # WV terms are converted kg/kg -> g/kg
+        assert float(totals["budget_diffusion_delta_WV"][-1]) == pytest.approx(
+            4 * 1e-4 * 1000.0)
+        assert totals["budget_diffusion_delta_WV"].attrs["units"] == "g/kg"
         # raw increments preserved when cumulative=False
         raw = sim.budget_totals(cumulative=False)
-        assert float(raw["budget_inject_liquid_mass"][1]) == pytest.approx(2.0)
+        assert float(raw["budget_inject_liquid_mass"][1]) == pytest.approx(
+            2.0 * kg_to_g_m3)
 
     def test_budget_totals_requires_budgets(self, sim_dir_no_micro):
         sim = CODTSimulation(sim_dir_no_micro)
@@ -616,8 +626,11 @@ class TestBudgets:
         _create_budget_nc(tmp_path)
         sim = CODTSimulation(tmp_path)
         result = sim.budget_closure()
-        # inject(3.0) - fallout(1.5) + condensation(1.5) = 3.0
-        assert result["sources_net"] == pytest.approx(3.0)
-        assert result["delta_lwc_mass"] == pytest.approx(3.0)
-        assert result["residual"] == pytest.approx(0.0, abs=1e-9)
+        # Terms are reported in g/m**3 of domain volume.
+        vol = 13.0 * 0.001 ** 2 * 1.0
+        # inject(3.0) - fallout(1.5) + condensation(1.5) = 3.0 kg
+        expected = 3.0 * 1000.0 / vol
+        assert result["sources_net"] == pytest.approx(expected)
+        assert result["delta_lwc_mass"] == pytest.approx(expected)
+        assert result["residual"] == pytest.approx(0.0, abs=1e-6 * expected)
         assert abs(result["relative_residual"]) < 1e-6
