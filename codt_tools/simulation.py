@@ -1344,7 +1344,10 @@ class CODTSimulation:
         delta_lwc_mass = float(m_liquid[-1] - m_liquid[0])
 
         residual = sources_net - delta_lwc_mass
-        scale = abs(inject) or abs(delta_lwc_mass) or 1.0
+        # Normalize by the dominant budget term so a near-zero inject (e.g.
+        # parcel mode, where nothing is injected) cannot inflate the ratio.
+        scale = max(abs(inject), abs(fallout), abs(condensation),
+                    abs(entrain), abs(detrain), abs(delta_lwc_mass)) or 1.0
         return {
             "inject_liquid_mass": inject,
             "fallout_liquid_mass": fallout,
