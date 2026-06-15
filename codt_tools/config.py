@@ -1414,6 +1414,5 @@ class CODTConfig:
     def __repr__(self) -> str:
         return (
             f"CODTConfig(name='{self.name}', "
-            f"injection={self.injection!r}, "
-            f"bins={self.bins!r})"
+            f"injection={self.injection!r})"
         )
