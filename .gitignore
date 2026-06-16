@@ -15,9 +15,6 @@ notebooks/
 # Simulation output (local only)
 test_runs/
 
-# Generated workshop website
-examples/site/html/
-
 # IDE / editor
 .vscode/
 .idea/
