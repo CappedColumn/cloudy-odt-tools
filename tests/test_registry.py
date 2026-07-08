@@ -358,6 +358,45 @@ class TestQueries:
 # Concurrency
 # ---------------------------------------------------------------------------
 
+class TestCLI:
+    def _run(self, db, *argv) -> int:
+        from codt_tools.registry.__main__ import main
+
+        return main(["--db", str(db), *argv])
+
+    def test_init_and_experiment_roundtrip(self, tmp_path, capsys):
+        db = tmp_path / "r.db"
+        assert self._run(db, "init") == 0
+        assert self._run(db, "experiment", "create", "exp1", "Title") == 0
+        assert self._run(db, "experiment", "list") == 0
+        assert "exp1" in capsys.readouterr().out
+
+    def test_update_status_and_show(self, registry, run_dir, capsys):
+        run_id = _register(registry, run_dir)
+        db = registry.db_path
+        assert self._run(db, "update-status", run_id, "running", "--job-id", "42") == 0
+        assert self._run(db, "show", run_id) == 0
+        out = capsys.readouterr().out
+        assert "running" in out and "42" in out
+
+    def test_export_csv(self, registry, run_dir, tmp_path, capsys):
+        run_id = _register(registry, run_dir)
+        csv_path = tmp_path / "runs.csv"
+        assert self._run(registry.db_path, "export", "--csv", str(csv_path)) == 0
+        content = csv_path.read_text()
+        assert run_id in content
+        assert "parameters.simulation_name" in content
+
+    def test_unknown_run_exits_nonzero(self, registry, capsys):
+        assert self._run(registry.db_path, "show", "nope") == 1
+
+    def test_missing_db_arg(self, monkeypatch, capsys):
+        monkeypatch.delenv("CODT_REGISTRY_DB", raising=False)
+        from codt_tools.registry.__main__ import main
+
+        assert main(["list"]) == 2
+
+
 def _hammer(db_path: str, run_id: str, n_updates: int) -> None:
     reg = Registry(db_path)
     for _ in range(n_updates):
