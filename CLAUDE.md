@@ -74,7 +74,7 @@ Global attrs on NC files: `conventions`, `code_version` (git-describe string fro
 
 ## Runner Layout
 
-`CODTRunner.setup_run` creates `{base}/{sim_name}/run/` with params.nml, aerosol_input.nc. Output goes to `{base}/`.
+`CODTRunner.setup_run` creates `{base}/{run_name}/` with `inputs/` (params.nml, aerosol_input.nc) and an empty `output/` (model writes here). The namelist `output_directory` is set to the absolute `output/` path; `executable` and `base_output_dir` are resolved to absolute in `__init__`, so local runs and generated sbatch scripts are cwd-independent. `aerosol_file` stays relative (`aerosol_input.nc`) and CODT resolves it against the namelist's parent (`inputs/`).
 
 `CODTRunner` queries `codt --version` at init and stores the result in `self.codt_version` (None if binary is missing or doesn't support `--version`).
 

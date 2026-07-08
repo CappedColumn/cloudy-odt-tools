@@ -1,14 +1,31 @@
 """CODT simulation runner: directory setup, local execution, and SLURM submission.
 
+Run directory layout (one directory per run under ``base_output_dir``)::
+
+    {base_output_dir}/{run_name}/
+        inputs/
+            params.nml
+            aerosol_input.nc
+            [parcel_input.nc]
+        output/
+            {sim_name}.nc, {sim_name}.log, {sim_name}_DONE, ...
+
+When a :class:`codt_tools.registry.Registry` is attached, every run is
+registered at setup time and its status is updated through the lifecycle
+(locally via the API, on SLURM via ``codt-registry`` CLI calls embedded in
+the batch script). Without a registry, behavior is unchanged.
+
 Example usage::
 
     from codt_tools import CODTConfig, CODTRunner
+    from codt_tools.registry import Registry
 
     runner = CODTRunner(
         executable="~/simulations/CODT/bin/CODT_exec",
         base_output_dir="/scratch/CODT_output",
         account="owner-guest",
         partition="notchpeak-guest",
+        registry=Registry("~/codt_registry.db"),   # optional
     )
 
     cfg = CODTConfig()
@@ -27,9 +44,12 @@ from __future__ import annotations
 import subprocess
 import warnings
 from pathlib import Path
-from typing import Union
+from typing import TYPE_CHECKING, Union
 
 from codt_tools.config import CODTConfig
+
+if TYPE_CHECKING:
+    from codt_tools.registry import Registry
 
 
 class CODTRunner:
@@ -47,6 +67,12 @@ class CODTRunner:
         SLURM partition name (e.g. ``"notchpeak-guest"``).
     cores_per_node : int, optional
         Maximum number of simulations to pack per SLURM node (default 40).
+    registry : Registry, optional
+        Simulation registry. When given, runs are registered at setup and
+        status transitions are tracked. All registry hooks are no-ops when
+        this is None.
+    experiment_id : str, optional
+        Experiment to attach registered runs to (requires ``registry``).
     """
 
     def __init__(
@@ -56,12 +82,16 @@ class CODTRunner:
         account: str,
         partition: str,
         cores_per_node: int = 40,
+        registry: "Registry | None" = None,
+        experiment_id: str | None = None,
     ) -> None:
         self.executable: Path = Path(executable).expanduser().resolve()
         self.base_output_dir: Path = Path(base_output_dir).expanduser().resolve()
         self.account: str = account
         self.partition: str = partition
         self.cores_per_node: int = cores_per_node
+        self.registry = registry
+        self.experiment_id = experiment_id
         self.codt_version: str | None = self._query_version()
 
     # ------------------------------------------------------------------
@@ -87,68 +117,102 @@ class CODTRunner:
     # Directory setup
     # ------------------------------------------------------------------
 
-    def setup_run(self, config: CODTConfig) -> Path:
-        """Create a run directory with all input files.
+    def setup_run(self, config: CODTConfig, run_id: str | None = None) -> Path:
+        """Create a run directory with input files and an output directory.
 
         Directory structure::
 
-            {base_output_dir}/{simulation_name}/
-                run/
-                    params.nml
-                    aerosol_input.nc
+            {base_output_dir}/{run_name}/
+                inputs/   (params.nml, aerosol_input.nc, ...)
+                output/   (created empty; model writes here)
 
-        The namelist ``output_directory`` is set to ``base_output_dir``
-        (absolute) so model output lands in
-        ``{base_output_dir}/{simulation_name}/``.
+        ``run_name`` is *run_id* if given, else the simulation name. The
+        namelist ``output_directory`` is set to the absolute ``output/``
+        path. With a registry attached, the run is registered under
+        ``run_name`` with status ``registered``.
 
         Parameters
         ----------
         config : CODTConfig
             Simulation configuration.
+        run_id : str, optional
+            Registry run identifier and directory name
+            (e.g. ``20260708_143022_codt_v2.1_control``).
 
         Returns
         -------
         Path
-            The simulation directory (``{base_output_dir}/{simulation_name}``).
+            The run directory (``{base_output_dir}/{run_name}``).
         """
-        sim_name = config.name
-        sim_dir = self.base_output_dir / sim_name
-        run_dir = sim_dir / "run"
+        run_name = run_id if run_id is not None else config.name
+        sim_dir = self.base_output_dir / run_name
+        inputs_dir = sim_dir / "inputs"
+        output_dir = sim_dir / "output"
 
-        config.params.set(output_directory=str(self.base_output_dir))
-        config.write(run_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        config.params.set(output_directory=str(output_dir))
+        config.write(inputs_dir)
 
+        if self.registry is not None:
+            self.registry.register_run(
+                run_name,
+                config,
+                sim_dir,
+                experiment_id=self.experiment_id,
+                executable_path=self.executable,
+                code_version=self.codt_version,
+            )
         return sim_dir
 
-    def setup_runs(self, configs: list[CODTConfig]) -> list[Path]:
+    def setup_runs(
+        self,
+        configs: list[CODTConfig],
+        run_ids: list[str] | None = None,
+    ) -> list[Path]:
         """Create run directories for multiple simulations.
 
         Parameters
         ----------
         configs : list[CODTConfig]
             List of simulation configurations.
+        run_ids : list[str], optional
+            Registry run identifiers, one per config.
 
         Returns
         -------
         list[Path]
-            Simulation directories, one per config.
+            Run directories, one per config.
         """
-        return [self.setup_run(cfg) for cfg in configs]
+        if run_ids is None:
+            return [self.setup_run(cfg) for cfg in configs]
+        if len(run_ids) != len(configs):
+            raise ValueError("run_ids and configs must have the same length")
+        return [
+            self.setup_run(cfg, run_id=rid) for cfg, rid in zip(configs, run_ids)
+        ]
 
     # ------------------------------------------------------------------
     # Local execution
     # ------------------------------------------------------------------
 
-    def run_local(self, config: CODTConfig) -> subprocess.CompletedProcess:
+    def run_local(
+        self,
+        config: CODTConfig,
+        run_id: str | None = None,
+    ) -> subprocess.CompletedProcess:
         """Set up and run a single simulation locally (blocking).
 
         The CODT model handles its own stdout redirection to a log file,
-        so no output capture is performed here.
+        so no output capture is performed here. With a registry attached,
+        status transitions (running -> completed/failed) and output
+        version metadata are recorded.
 
         Parameters
         ----------
         config : CODTConfig
             Simulation configuration.
+        run_id : str, optional
+            Registry run identifier (defaults to the simulation name).
 
         Returns
         -------
@@ -166,13 +230,27 @@ class CODTRunner:
                 f"Executable not found: {self.executable}"
             )
 
-        sim_dir = self.setup_run(config)
-        nml_path = sim_dir / "run" / "params.nml"
+        sim_dir = self.setup_run(config, run_id=run_id)
+        run_name = sim_dir.name
+        nml_path = sim_dir / "inputs" / "params.nml"
 
-        return subprocess.run(
+        if self.registry is not None:
+            self.registry.update_status(run_name, "running")
+
+        proc = subprocess.run(
             [str(self.executable), str(nml_path)],
             check=False,
         )
+
+        if self.registry is not None:
+            status = "completed" if proc.returncode == 0 else "failed"
+            self.registry.update_status(
+                run_name, status, exit_code=proc.returncode
+            )
+            output_nc = sim_dir / "output" / f"{config.name}.nc"
+            if proc.returncode == 0 and output_nc.is_file():
+                self.registry.record_completion(run_name, output_nc)
+        return proc
 
     # ------------------------------------------------------------------
     # SLURM submission
@@ -186,12 +264,16 @@ class CODTRunner:
     ) -> str:
         """Generate a SLURM batch script for a set of simulations.
 
-        Each simulation is pinned to a specific core via ``taskset``.
+        Each simulation is pinned to a specific core via ``taskset``. With
+        a registry attached, each simulation is wrapped in a subshell that
+        reports running/completed/failed status through the
+        ``codt-registry`` CLI; registry failures never kill the run
+        (``|| true``).
 
         Parameters
         ----------
         run_dirs : list[Path]
-            Simulation directories (each containing ``run/params.nml``).
+            Run directories (each containing ``inputs/params.nml``).
         walltime : str
             SLURM wall-clock time (e.g. ``"24:00:00"``).
         batch_id : int, optional
@@ -213,11 +295,34 @@ class CODTRunner:
             "",
         ]
 
-        for i, sim_dir in enumerate(run_dirs):
-            nml_path = sim_dir / "run" / "params.nml"
-            lines.append(
-                f"taskset -c {i} {self.executable} {nml_path} &"
-            )
+        if self.registry is None:
+            for i, sim_dir in enumerate(run_dirs):
+                nml_path = sim_dir / "inputs" / "params.nml"
+                lines.append(
+                    f"taskset -c {i} {self.executable} {nml_path} &"
+                )
+        else:
+            db = self.registry.db_path
+            lines.append(f'REGISTRY="codt-registry --db {db}"')
+            lines.append("")
+            for i, sim_dir in enumerate(run_dirs):
+                run_name = sim_dir.name
+                nml_path = sim_dir / "inputs" / "params.nml"
+                lines.extend([
+                    "(",
+                    f'  $REGISTRY update-status {run_name} running '
+                    f'--job-id "$SLURM_JOB_ID" || true',
+                    f"  taskset -c {i} {self.executable} {nml_path}",
+                    "  rc=$?",
+                    f"  if [ $rc -eq 0 ]; then",
+                    f"    $REGISTRY update-status {run_name} completed "
+                    f"--exit-code $rc || true",
+                    f"  else",
+                    f"    $REGISTRY update-status {run_name} failed "
+                    f"--exit-code $rc || true",
+                    f"  fi",
+                    ") &",
+                ])
 
         lines.append("wait")
         return "\n".join(lines) + "\n"
@@ -231,12 +336,13 @@ class CODTRunner:
         """Submit simulations to SLURM (or generate scripts only).
 
         Simulations are batched into groups of ``cores_per_node``, each
-        group becoming one SLURM job.
+        group becoming one SLURM job. With a registry attached, runs are
+        marked ``queued`` (with their job ID) on successful submission.
 
         Parameters
         ----------
         run_dirs : list[Path]
-            Simulation directories (from :meth:`setup_run`).
+            Run directories (from :meth:`setup_run`).
         walltime : str, optional
             SLURM wall-clock time (default ``"24:00:00"``).
         dry_run : bool, optional
@@ -280,6 +386,12 @@ class CODTRunner:
                 job_id = proc.stdout.strip().split()[-1]
                 results.append(job_id)
 
+                if self.registry is not None:
+                    for sim_dir in batch:
+                        self.registry.update_status(
+                            sim_dir.name, "queued", slurm_job_id=job_id
+                        )
+
         return results
 
     # ------------------------------------------------------------------
@@ -320,18 +432,20 @@ class CODTRunner:
         }
 
     def _resolve_output_dir(self, name: str) -> Path:
-        """Find the output directory for a simulation.
+        """Find the output directory for a run.
 
-        Reads ``output_directory`` from the run namelist at
-        ``{base}/{name}/run/params.nml``.  Falls back to
-        ``base_output_dir`` if the namelist doesn't exist.
+        Checks, in order: ``{base}/{name}/output/`` (standard layout),
+        the ``output_directory`` value in ``{base}/{name}/inputs/params.nml``,
+        and finally ``base_output_dir``.
         """
-        nml_path = self.base_output_dir / name / "run" / "params.nml"
+        output_dir = self.base_output_dir / name / "output"
+        if output_dir.is_dir():
+            return output_dir
+        nml_path = self.base_output_dir / name / "inputs" / "params.nml"
         if nml_path.is_file():
             from codt_tools.config import Namelist
             nml = Namelist(nml_path)
-            output_dir = nml.get("output_directory")
-            out = Path(output_dir)
+            out = Path(nml.get("output_directory"))
             if not out.is_absolute():
                 out = (nml_path.parent / out).resolve()
             return out
@@ -339,27 +453,29 @@ class CODTRunner:
 
     def collect(
         self,
-        sim_names: list[str],
+        run_names: list[str],
         output_dir: Union[str, Path, None] = None,
     ) -> list:
         """Load completed simulations as CODTSimulation objects.
 
-        For each simulation, the output directory is resolved in order:
+        For each run, the output directory is resolved in order:
 
         1. *output_dir* argument (if given).
-        2. ``output_directory`` from the run namelist at
-           ``{base}/{name}/run/params.nml``.
-        3. ``base_output_dir`` as a last resort.
+        2. ``{base}/{run_name}/output/`` (standard layout).
+        3. ``output_directory`` from ``{base}/{run_name}/inputs/params.nml``.
+        4. ``base_output_dir`` as a last resort.
 
-        Output files are expected at ``{output_dir}/{name}.nc``,
-        ``{output_dir}/{name}_DONE``, etc. (flat layout, CODT v0.5.x).
+        With a registry attached, collected runs get their output version
+        metadata recorded and status set to ``collected``.
 
         Parameters
         ----------
-        sim_names : list[str]
-            Simulation names to collect.
+        run_names : list[str]
+            Run directory names to collect. For runs where the run name
+            differs from the namelist ``simulation_name``, output files
+            are found by globbing the ``_DONE`` marker.
         output_dir : str or Path, optional
-            Explicit output directory. Overrides namelist lookup.
+            Explicit output directory. Overrides resolution.
 
         Returns
         -------
@@ -372,9 +488,13 @@ class CODTRunner:
         explicit_dir = Path(output_dir) if output_dir is not None else None
 
         results = []
-        for name in sim_names:
+        for name in run_names:
             out = explicit_dir if explicit_dir is not None else self._resolve_output_dir(name)
+            done_markers = sorted(out.glob("*_DONE"))
             done_marker = out / f"{name}_DONE"
+            if not done_marker.is_file() and len(done_markers) == 1:
+                # Run directory name differs from simulation_name
+                done_marker = done_markers[0]
             if not done_marker.is_file():
                 warnings.warn(
                     f"Simulation '{name}' has no DONE marker at "
@@ -383,8 +503,13 @@ class CODTRunner:
                     stacklevel=2,
                 )
                 continue
-            nc_path = out / f"{name}.nc"
+            sim_name = done_marker.name.removesuffix("_DONE")
+            nc_path = out / f"{sim_name}.nc"
             results.append(CODTSimulation(nc_path))
+
+            if self.registry is not None:
+                self.registry.record_completion(name, nc_path)
+                self.registry.update_status(name, "collected")
 
         return results
 

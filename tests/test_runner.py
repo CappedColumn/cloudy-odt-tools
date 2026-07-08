@@ -39,8 +39,9 @@ class TestSetupRun:
         sim_dir = runner.setup_run(config)
 
         assert sim_dir.is_dir()
-        assert (sim_dir / "run" / "params.nml").is_file()
-        assert (sim_dir / "run" / "aerosol_input.nc").is_file()
+        assert (sim_dir / "inputs" / "params.nml").is_file()
+        assert (sim_dir / "inputs" / "aerosol_input.nc").is_file()
+        assert (sim_dir / "output").is_dir()
 
     def test_sim_dir_path(
         self, runner: CODTRunner, config: CODTConfig
@@ -56,7 +57,7 @@ class TestSetupRun:
         runner.setup_run(config)
 
         assert config.params.get("output_directory") == str(
-            runner.base_output_dir
+            runner.base_output_dir / "test_sim" / "output"
         )
 
     def test_auto_sets_data_paths(
@@ -78,7 +79,7 @@ class TestSetupRun:
         assert len(sim_dirs) == 3
         for i, sim_dir in enumerate(sim_dirs):
             assert sim_dir.name == f"batch_{i}"
-            assert (sim_dir / "run" / "params.nml").is_file()
+            assert (sim_dir / "inputs" / "params.nml").is_file()
 
     def test_namelist_content_readable(
         self, runner: CODTRunner, config: CODTConfig
@@ -86,7 +87,7 @@ class TestSetupRun:
         """Verify the written namelist can be read back."""
         sim_dir = runner.setup_run(config)
 
-        reloaded = CODTConfig(sim_dir / "run" / "params.nml")
+        reloaded = CODTConfig(sim_dir / "inputs" / "params.nml")
         assert reloaded.name == "test_sim"
 
 
@@ -125,7 +126,7 @@ class TestGenerateSbatch:
         run_dirs = [Path("/scratch/sim_0")]
         script = runner._generate_sbatch(run_dirs, "01:00:00")
 
-        assert "/scratch/sim_0/run/params.nml" in script
+        assert "/scratch/sim_0/inputs/params.nml" in script
 
 
 class TestSubmit:
@@ -194,9 +195,9 @@ class TestCollect:
         out.mkdir(parents=True)
         cfg = CODTConfig()
         cfg.set(simulation_name=name, output_directory=str(out))
-        run_dir = base / name / "run"
-        run_dir.mkdir(parents=True)
-        cfg.params.write(run_dir / "params.nml")
+        inputs_dir = base / name / "inputs"
+        inputs_dir.mkdir(parents=True)
+        cfg.params.write(inputs_dir / "params.nml")
 
         # Put output in the custom directory
         _create_main_nc(out, name=name)
@@ -229,6 +230,95 @@ class TestCollect:
         with pytest.warns(UserWarning, match="no DONE marker"):
             results = runner.collect(["no_done"])
         assert len(results) == 0
+
+
+class TestRegistryHooks:
+    """Runner-registry integration (and the registry=None no-op path)."""
+
+    @pytest.fixture
+    def reg_runner(self, tmp_path: Path):
+        from codt_tools.registry import Registry
+
+        registry = Registry(tmp_path / "registry.db")
+        registry.create_experiment("exp1", "Test experiment")
+        runner = CODTRunner(
+            executable="/usr/local/bin/codt",
+            base_output_dir=tmp_path / "output",
+            account="owner-guest",
+            partition="notchpeak-guest",
+            cores_per_node=4,
+            registry=registry,
+            experiment_id="exp1",
+        )
+        yield runner, registry
+        registry.close()
+
+    def test_setup_run_registers(self, reg_runner, config: CODTConfig) -> None:
+        runner, registry = reg_runner
+        runner.setup_run(config, run_id="20260708_000000_codt_test")
+        run = registry.get_run("20260708_000000_codt_test")
+        assert run["status"] == "registered"
+        assert run["experiment_id"] == "exp1"
+
+    def test_setup_run_defaults_to_sim_name(
+        self, reg_runner, config: CODTConfig
+    ) -> None:
+        runner, registry = reg_runner
+        sim_dir = runner.setup_run(config)
+        assert sim_dir.name == "test_sim"
+        assert registry.get_run("test_sim")["status"] == "registered"
+
+    def test_sbatch_contains_registry_lines(
+        self, reg_runner, config: CODTConfig
+    ) -> None:
+        runner, registry = reg_runner
+        sim_dir = runner.setup_run(config)
+        script = runner._generate_sbatch([sim_dir], "01:00:00")
+        assert f"codt-registry --db {registry.db_path}" in script
+        assert "update-status test_sim running" in script
+        assert "update-status test_sim completed" in script
+        assert "update-status test_sim failed" in script
+        assert "|| true" in script
+
+    def test_sbatch_without_registry_has_no_hooks(
+        self, runner: CODTRunner, config: CODTConfig
+    ) -> None:
+        sim_dir = runner.setup_run(config)
+        script = runner._generate_sbatch([sim_dir], "01:00:00")
+        assert "codt-registry" not in script
+
+    def test_collect_records_completion(self, reg_runner) -> None:
+        from conftest import _create_main_nc
+
+        runner, registry = reg_runner
+        cfg = CODTConfig()
+        cfg.set(simulation_name="col_sim")
+        sim_dir = runner.setup_run(cfg)
+        out = sim_dir / "output"
+        _create_main_nc(out, name="col_sim")
+        (out / "col_sim_DONE").write_text("2026-07-08\n")
+
+        results = runner.collect(["col_sim"])
+        assert len(results) == 1
+        run = registry.get_run("col_sim")
+        assert run["status"] == "collected"
+        assert run["conventions"] == "CODT_output_v1"
+
+    def test_collect_run_id_differs_from_sim_name(self, reg_runner) -> None:
+        from conftest import _create_main_nc
+
+        runner, registry = reg_runner
+        cfg = CODTConfig()
+        cfg.set(simulation_name="innername")
+        sim_dir = runner.setup_run(cfg, run_id="20260708_000000_codt_x")
+        out = sim_dir / "output"
+        _create_main_nc(out, name="innername")
+        (out / "innername_DONE").write_text("2026-07-08\n")
+
+        results = runner.collect(["20260708_000000_codt_x"])
+        assert len(results) == 1
+        assert results[0].name == "innername"
+        assert registry.get_run("20260708_000000_codt_x")["status"] == "collected"
 
 
 class TestRepr:
