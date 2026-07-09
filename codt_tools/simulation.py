@@ -19,6 +19,7 @@ import numpy as np
 import xarray as xr
 
 from codt_tools.config import Namelist
+from codt_tools.registry.versions import check_conventions
 from codt_tools.plotting import (
     _ensure_ax,
     _get_label,
@@ -115,6 +116,9 @@ class CODTSimulation:
         self._ds: xr.Dataset = xr.open_dataset(
             self._nc_path, decode_timedelta=False
         )
+        # Gate: warn if the output conventions are not supported by this
+        # version of codt_tools (analysis code may misread the file).
+        check_conventions(self._ds.attrs.get("conventions"))
         self._load_params()
 
     # ------------------------------------------------------------------

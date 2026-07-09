@@ -38,6 +38,33 @@ class TestInit:
             CODTSimulation(tmp_path)
 
 
+# ── Conventions gate ─────────────────────────────────────────────────
+
+class TestConventionsGate:
+
+    def test_supported_conventions_no_warning(self, sim_dir, recwarn):
+        CODTSimulation(sim_dir)  # fixture writes CODT_output_v1
+        assert not [
+            w for w in recwarn if "conventions" in str(w.message).lower()
+        ]
+
+    def test_unsupported_conventions_warns(self, sim_dir):
+        import netCDF4
+
+        with netCDF4.Dataset(sim_dir / "test_sim.nc", "a") as ds:
+            ds.setncattr("conventions", "CODT_output_v99")
+        with pytest.warns(UserWarning, match="conventions"):
+            CODTSimulation(sim_dir)
+
+    def test_missing_conventions_warns(self, sim_dir):
+        import netCDF4
+
+        with netCDF4.Dataset(sim_dir / "test_sim.nc", "a") as ds:
+            ds.delncattr("conventions")
+        with pytest.warns(UserWarning, match="conventions"):
+            CODTSimulation(sim_dir)
+
+
 # ── Metadata & properties ────────────────────────────────────────────
 
 class TestMetadata:
@@ -570,6 +597,7 @@ def _create_budget_nc(path, name="test_sim"):
     lwc = m_liquid * 1000.0 / vol              # kg -> g/m**3
 
     with nc.Dataset(nc_path, "w", format="NETCDF4") as ds:
+        ds.setncattr("conventions", "CODT_output_v1")
         ds.setncattr("PARAMETERS.volume_scaling", 13)
         ds.setncattr("PARAMETERS.H", 1.0)
         ds.setncattr("PARAMETERS.do_microphysics", 1)
