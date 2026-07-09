@@ -23,7 +23,7 @@ import sys
 from typing import Any
 
 from codt_tools.registry.api import Registry
-from codt_tools.registry.db import RUN_STATUSES
+from codt_tools.registry.db import DATA_STATUSES, RUN_STATUSES
 
 _RUN_LIST_COLUMNS: tuple[str, ...] = (
     "run_id",
@@ -105,6 +105,25 @@ def _build_parser() -> argparse.ArgumentParser:
     p_data.add_argument("run_id")
     p_data.add_argument(
         "data_status", choices=("on_scratch", "on_group", "archived", "deleted")
+    )
+
+    p_reloc = sub.add_parser(
+        "relocate",
+        help="Record an experiment tree's move to a new data root "
+        "(run after copying; verifies data before updating).",
+    )
+    p_reloc.add_argument("experiment_id")
+    p_reloc.add_argument("new_root")
+    p_reloc.add_argument(
+        "--data-status",
+        default="on_group",
+        choices=DATA_STATUSES,
+        help="New data_status for all runs (default: on_group).",
+    )
+    p_reloc.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="Skip checksum verification of relocated input files.",
     )
 
     p_exp = sub.add_parser("experiment", help="Experiment operations.")
@@ -213,6 +232,17 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "set-data-status":
                 reg.set_data_status(args.run_id, args.data_status)
                 print(f"{args.run_id}: data_status={args.data_status}")
+            elif args.command == "relocate":
+                reg.relocate_experiment(
+                    args.experiment_id,
+                    args.new_root,
+                    data_status=args.data_status,
+                    verify=not args.no_verify,
+                )
+                print(
+                    f"{args.experiment_id}: data_root={args.new_root}, "
+                    f"runs data_status={args.data_status}"
+                )
             elif args.command == "experiment":
                 if args.exp_command == "create":
                     reg.create_experiment(

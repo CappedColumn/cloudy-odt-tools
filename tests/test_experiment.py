@@ -23,6 +23,7 @@ def spec(tmp_path: Path) -> ExperimentSpec:
         title="Tref sensitivity",
         data_root=tmp_path / "data",
         hypothesis="Warmer base temperature increases LWC.",
+        permanent_data_root=tmp_path / "group",
         base_parameters={"tmax": 60.0},
         parameter_sweep={"tref": [20.0, 22.0], "volume_scaling": [13, 50]},
         execution_context="unit-test",
@@ -55,6 +56,12 @@ class TestSpecYaml:
             "tref": [20.0, 22.0], "volume_scaling": [13, 50]
         }
         assert loaded.slurm_options["walltime"] == "01:00:00"
+        assert Path(loaded.permanent_data_root).name == "group"
+
+    def test_permanent_data_root_optional(self, tmp_path: Path) -> None:
+        path = tmp_path / "minimal.yaml"
+        path.write_text("experiment_id: X\ntitle: t\ndata_root: /tmp\n")
+        assert ExperimentSpec.from_yaml(path).permanent_data_root is None
 
     def test_unknown_field_rejected(self, tmp_path: Path) -> None:
         path = tmp_path / "bad.yaml"
@@ -204,6 +211,79 @@ class TestCreateExperimentRuns:
             (rd / "inputs" / "params.nml").read_text() for rd in run_dirs
         }
         assert len(contents) == 4  # every sweep point has a distinct namelist
+
+    def test_relocate_experiment(
+        self, spec: ExperimentSpec, registry: Registry, tmp_path: Path
+    ) -> None:
+        """Scratch -> group workflow: move tree, verify, update registry."""
+        import shutil
+
+        create_experiment_runs(spec, registry, "/usr/local/bin/codt")
+
+        # Move the whole experiment tree (as rsync/mv would).
+        new_root = Path(spec.permanent_data_root)
+        new_root.mkdir()
+        shutil.move(str(spec.experiment_dir), str(new_root))
+
+        registry.relocate_experiment("EXP001", new_root)
+
+        exp = registry.get_experiment("EXP001")
+        assert exp["data_root"] == str(new_root.resolve())
+        for run in registry.query_runs(experiment_id="EXP001"):
+            assert run["data_status"] == "on_group"
+            assert (new_root / run["run_dir"] / "inputs" / "params.nml").is_file()
+
+    def test_relocate_missing_data_rejected(
+        self, spec: ExperimentSpec, registry: Registry, tmp_path: Path
+    ) -> None:
+        create_experiment_runs(spec, registry, "/usr/local/bin/codt")
+        empty_root = tmp_path / "empty"
+        empty_root.mkdir()
+
+        with pytest.raises(FileNotFoundError):
+            registry.relocate_experiment("EXP001", empty_root)
+        # Registry unchanged on failure.
+        exp = registry.get_experiment("EXP001")
+        assert exp["data_root"] != str(empty_root.resolve())
+
+    def test_relocate_checksum_mismatch_rejected(
+        self, spec: ExperimentSpec, registry: Registry, tmp_path: Path
+    ) -> None:
+        import shutil
+
+        _, run_dirs = create_experiment_runs(
+            spec, registry, "/usr/local/bin/codt"
+        )
+        new_root = Path(spec.permanent_data_root)
+        new_root.mkdir()
+        shutil.move(str(spec.experiment_dir), str(new_root))
+
+        # Corrupt one relocated shared input.
+        shared = new_root / "EXP001" / "shared_inputs" / "aerosol_input.nc"
+        shared.write_bytes(b"corrupted")
+
+        with pytest.raises(ValueError, match="Checksum mismatch"):
+            registry.relocate_experiment("EXP001", new_root)
+
+    def test_relocate_via_cli(
+        self, spec: ExperimentSpec, registry: Registry
+    ) -> None:
+        import shutil
+
+        from codt_tools.registry.__main__ import main
+
+        create_experiment_runs(spec, registry, "/usr/local/bin/codt")
+        new_root = Path(spec.permanent_data_root)
+        new_root.mkdir()
+        shutil.move(str(spec.experiment_dir), str(new_root))
+
+        rc = main([
+            "--db", str(registry.db_path),
+            "relocate", "EXP001", str(new_root),
+        ])
+        assert rc == 0
+        exp = registry.get_experiment("EXP001")
+        assert exp["data_root"] == str(new_root.resolve())
 
     def test_end_to_end_dry_run(
         self, spec: ExperimentSpec, registry: Registry

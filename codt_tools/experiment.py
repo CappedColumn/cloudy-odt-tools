@@ -66,6 +66,11 @@ class ExperimentSpec:
         product via :meth:`CODTConfig.sweep`. Empty means a single run.
     execution_context : str, optional
         Free-text note on where/how runs execute (e.g. ``"notchpeak"``).
+    permanent_data_root : str or Path, optional
+        Where the experiment tree should live long-term (e.g. group
+        space). Runs execute under ``data_root`` (typically scratch);
+        after validation the tree is moved here and the registry
+        updated via ``Registry.relocate_experiment``.
     slurm_options : dict, optional
         SLURM settings for the runner: ``account``, ``partition``,
         ``cores_per_node``, ``walltime``.
@@ -79,6 +84,7 @@ class ExperimentSpec:
     base_parameters: dict[str, Any] = field(default_factory=dict)
     parameter_sweep: dict[str, list] = field(default_factory=dict)
     execution_context: str | None = None
+    permanent_data_root: Union[str, Path, None] = None
     slurm_options: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -129,6 +135,10 @@ class ExperimentSpec:
             "base_parameters": self.base_parameters,
             "parameter_sweep": self.parameter_sweep,
             "execution_context": self.execution_context,
+            "permanent_data_root": (
+                str(self.permanent_data_root)
+                if self.permanent_data_root is not None else None
+            ),
             "slurm_options": self.slurm_options,
         }
         with open(path, "w") as f:

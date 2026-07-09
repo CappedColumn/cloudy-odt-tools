@@ -3,7 +3,8 @@
 The simulation registry tracks CODT experiments and runs in a single
 SQLite file: what was run, with which parameters and code version,
 where the data lives, and what was concluded. This walkthrough covers
-the full lifecycle: **define → create → run → query → conclude**.
+the full lifecycle: **define → create → run → query → validate/move →
+conclude**.
 
 ## 0. Setup
 
@@ -33,9 +34,14 @@ hypothesis: >
 model: codt
 execution_context: notchpeak
 
-# Where the experiment tree is created:
+# Where the experiment tree is created (runs execute here; scratch is
+# the normal choice):
 #   {data_root}/{experiment_id}/{experiment.yaml, shared_inputs/, runs/}
 data_root: /scratch/general/vast/u1342804/CODT/experiments
+
+# Optional: where the tree should live long-term. Runs go to scratch,
+# and after validation the tree is moved here (see step 5a).
+permanent_data_root: /uufs/chpc.utah.edu/common/home/group-space/CODT/experiments
 
 # Namelist overrides applied to every run (flat param -> value;
 # groups are resolved automatically).
@@ -125,7 +131,34 @@ Loading output emits a warning if the file's `conventions` attribute
 is not supported by your codt_tools version (the *conventions gate* —
 see [using-a-shared-registry.md](using-a-shared-registry.md)).
 
-## 5. Conclude
+## 5. Move validated data off scratch
+
+The normal lifecycle is **run on scratch → validate/QC → move to
+group space**. Once the runs pass quality control (all `_DONE`
+markers present, budgets close, output loads cleanly):
+
+```bash
+# 1. Move the WHOLE experiment directory (keeps relative symlinks valid)
+rsync -a /scratch/.../experiments/EXP001_tref_sensitivity \
+    /uufs/.../group-space/CODT/experiments/
+
+# 2. Verify + update the registry in one step
+codt-registry relocate EXP001_tref_sensitivity \
+    /uufs/.../group-space/CODT/experiments
+```
+
+`relocate` refuses to update the registry unless every run directory
+exists at the new root and the recorded input-file checksums match the
+relocated content — a botched copy can't silently become the recorded
+truth. On success it sets `experiments.data_root` and flips every
+run's `data_status` to `on_group` (override with `--data-status`;
+skip checksums with `--no-verify`). Only then delete the scratch copy.
+
+The intended destination is recorded up front as
+`permanent_data_root` in `experiment.yaml`, so this step needs no
+decisions.
+
+## 6. Conclude
 
 ```bash
 codt-registry experiment conclude EXP001_tref_sensitivity \

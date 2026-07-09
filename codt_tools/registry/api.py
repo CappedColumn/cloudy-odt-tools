@@ -442,6 +442,89 @@ class Registry:
         if cur.rowcount == 0:
             raise KeyError(f"Unknown run: {run_id}")
 
+    def relocate_experiment(
+        self,
+        experiment_id: str,
+        new_root: str | Path,
+        *,
+        data_status: str = "on_group",
+        verify: bool = True,
+    ) -> None:
+        """Record that an experiment tree has moved to a new data root.
+
+        Call this **after** the tree has been copied/moved (e.g. from
+        scratch to group space). The registry update only commits if
+        the data verifiably exists at the new root: every run directory
+        must be present, and (with *verify*) recorded input-file
+        checksums must match the relocated content. On success,
+        ``experiments.data_root`` and all runs' ``data_status`` are
+        updated in one transaction. ``run_dir`` values are relative and
+        unchanged.
+
+        Parameters
+        ----------
+        experiment_id : str
+            The experiment to relocate.
+        new_root : str or Path
+            The new data root (parent of the experiment directory).
+        data_status : str, optional
+            New data location status for all runs (default
+            ``"on_group"``).
+        verify : bool, optional
+            If ``True`` (default), re-checksum each run's recorded
+            input files at the new location and require a match.
+
+        Raises
+        ------
+        FileNotFoundError
+            If a run directory or recorded input file is missing at
+            the new root.
+        ValueError
+            If a relocated file's checksum does not match the registry.
+        """
+        new_root = Path(new_root).expanduser().resolve()
+        runs = self.query_runs(experiment_id=experiment_id)
+
+        for run in runs:
+            if run["data_status"] == "deleted":
+                continue
+            run_dir = new_root / run["run_dir"]
+            if not run_dir.is_dir():
+                raise FileNotFoundError(
+                    f"Run directory not found at new root: {run_dir}"
+                )
+            if not verify:
+                continue
+            rows = self._conn.execute(
+                "SELECT file_path, checksum FROM input_files "
+                "WHERE run_id = ?",
+                (run["run_id"],),
+            ).fetchall()
+            for row in rows:
+                path = run_dir / "inputs" / row["file_path"]
+                if not path.exists():
+                    raise FileNotFoundError(
+                        f"Recorded input file missing after move: {path}"
+                    )
+                if row["checksum"] and sha256_file(path) != row["checksum"]:
+                    raise ValueError(
+                        f"Checksum mismatch after move: {path} — "
+                        "data may be corrupted; registry not updated."
+                    )
+
+        with self._conn:
+            cur = self._conn.execute(
+                "UPDATE experiments SET data_root = ? WHERE experiment_id = ?",
+                (str(new_root), experiment_id),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(f"Unknown experiment: {experiment_id}")
+            self._conn.execute(
+                "UPDATE runs SET data_status = ? WHERE experiment_id = ? "
+                "AND (data_status IS NULL OR data_status != 'deleted')",
+                (data_status, experiment_id),
+            )
+
     # ------------------------------------------------------------------
     # Queries
     # ------------------------------------------------------------------

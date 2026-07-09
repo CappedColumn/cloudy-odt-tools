@@ -70,8 +70,11 @@ locks:
 
 The DB is authoritative for where run data lives:
 `experiments.data_root` (absolute) + `runs.run_dir` (relative). If an
-experiment tree is moved, update `data_root` once
-(`codt-registry`/`update_experiment`) — run rows don't change.
+experiment tree is moved (e.g. scratch → group after QC), use
+`codt-registry relocate <experiment_id> <new_root>` — it verifies the
+data exists (with matching checksums) at the new root, then updates
+`data_root` and every run's `data_status` in one transaction. Run rows'
+`run_dir` values don't change.
 
 Keep `data_status` truthful when you touch other people's data areas:
 
