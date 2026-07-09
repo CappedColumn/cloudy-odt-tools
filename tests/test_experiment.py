@@ -43,6 +43,15 @@ def registry(tmp_path: Path) -> Generator[Registry, None, None]:
     reg.close()
 
 
+@pytest.fixture
+def codt_exe(tmp_path: Path) -> Path:
+    """A stub CODT executable that reports a valid version."""
+    exe = tmp_path / "codt"
+    exe.write_text('#!/bin/bash\necho "CODT v1.0.0 (abc1234)"\n')
+    exe.chmod(0o755)
+    return exe
+
+
 class TestSpecYaml:
 
     def test_roundtrip(self, spec: ExperimentSpec, tmp_path: Path) -> None:
@@ -151,10 +160,10 @@ class TestDedupSharedInputs:
 class TestCreateExperimentRuns:
 
     def test_layout_and_registration(
-        self, spec: ExperimentSpec, registry: Registry
+        self, spec: ExperimentSpec, registry: Registry, codt_exe: Path
     ) -> None:
         runner, run_dirs = create_experiment_runs(
-            spec, registry, "/usr/local/bin/codt"
+            spec, registry, codt_exe
         )
 
         exp_dir = spec.experiment_dir
@@ -175,10 +184,10 @@ class TestCreateExperimentRuns:
             assert r["run_id"].split("_", 2)[2] == f"codt_{r['descriptor']}"
 
     def test_shared_inputs_deduped(
-        self, spec: ExperimentSpec, registry: Registry
+        self, spec: ExperimentSpec, registry: Registry, codt_exe: Path
     ) -> None:
         _, run_dirs = create_experiment_runs(
-            spec, registry, "/usr/local/bin/codt"
+            spec, registry, codt_exe
         )
 
         shared = spec.experiment_dir / "shared_inputs"
@@ -202,10 +211,10 @@ class TestCreateExperimentRuns:
         assert rows[0]["checksum"] == sha256_file(shared / "aerosol_input.nc")
 
     def test_namelists_differ_per_run(
-        self, spec: ExperimentSpec, registry: Registry
+        self, spec: ExperimentSpec, registry: Registry, codt_exe: Path
     ) -> None:
         _, run_dirs = create_experiment_runs(
-            spec, registry, "/usr/local/bin/codt"
+            spec, registry, codt_exe
         )
         contents = {
             (rd / "inputs" / "params.nml").read_text() for rd in run_dirs
@@ -213,12 +222,13 @@ class TestCreateExperimentRuns:
         assert len(contents) == 4  # every sweep point has a distinct namelist
 
     def test_relocate_experiment(
-        self, spec: ExperimentSpec, registry: Registry, tmp_path: Path
+        self, spec: ExperimentSpec, registry: Registry, codt_exe: Path,
+        tmp_path: Path
     ) -> None:
         """Scratch -> group workflow: move tree, verify, update registry."""
         import shutil
 
-        create_experiment_runs(spec, registry, "/usr/local/bin/codt")
+        create_experiment_runs(spec, registry, codt_exe)
 
         # Move the whole experiment tree (as rsync/mv would).
         new_root = Path(spec.permanent_data_root)
@@ -234,9 +244,10 @@ class TestCreateExperimentRuns:
             assert (new_root / run["run_dir"] / "inputs" / "params.nml").is_file()
 
     def test_relocate_missing_data_rejected(
-        self, spec: ExperimentSpec, registry: Registry, tmp_path: Path
+        self, spec: ExperimentSpec, registry: Registry, codt_exe: Path,
+        tmp_path: Path
     ) -> None:
-        create_experiment_runs(spec, registry, "/usr/local/bin/codt")
+        create_experiment_runs(spec, registry, codt_exe)
         empty_root = tmp_path / "empty"
         empty_root.mkdir()
 
@@ -247,12 +258,13 @@ class TestCreateExperimentRuns:
         assert exp["data_root"] != str(empty_root.resolve())
 
     def test_relocate_checksum_mismatch_rejected(
-        self, spec: ExperimentSpec, registry: Registry, tmp_path: Path
+        self, spec: ExperimentSpec, registry: Registry, codt_exe: Path,
+        tmp_path: Path
     ) -> None:
         import shutil
 
         _, run_dirs = create_experiment_runs(
-            spec, registry, "/usr/local/bin/codt"
+            spec, registry, codt_exe
         )
         new_root = Path(spec.permanent_data_root)
         new_root.mkdir()
@@ -266,13 +278,13 @@ class TestCreateExperimentRuns:
             registry.relocate_experiment("EXP001", new_root)
 
     def test_relocate_via_cli(
-        self, spec: ExperimentSpec, registry: Registry
+        self, spec: ExperimentSpec, registry: Registry, codt_exe: Path
     ) -> None:
         import shutil
 
         from codt_tools.registry.__main__ import main
 
-        create_experiment_runs(spec, registry, "/usr/local/bin/codt")
+        create_experiment_runs(spec, registry, codt_exe)
         new_root = Path(spec.permanent_data_root)
         new_root.mkdir()
         shutil.move(str(spec.experiment_dir), str(new_root))
@@ -285,12 +297,110 @@ class TestCreateExperimentRuns:
         exp = registry.get_experiment("EXP001")
         assert exp["data_root"] == str(new_root.resolve())
 
-    def test_end_to_end_dry_run(
+    def test_missing_executable_rejected(
         self, spec: ExperimentSpec, registry: Registry
+    ) -> None:
+        with pytest.raises(FileNotFoundError, match="executable"):
+            create_experiment_runs(spec, registry, "/nonexistent/codt")
+        # Nothing was registered.
+        with pytest.raises(KeyError):
+            registry.get_experiment("EXP001")
+
+    def test_bad_build_rejected(
+        self, spec: ExperimentSpec, registry: Registry, tmp_path: Path
+    ) -> None:
+        """A binary without injected version info must be refused."""
+        exe = tmp_path / "codt_bad"
+        exe.write_text('#!/bin/bash\necho "CODT VERSION_PLACEHOLDER"\n')
+        exe.chmod(0o755)
+
+        with pytest.raises(ValueError, match="Rebuild CODT"):
+            create_experiment_runs(spec, registry, exe)
+        with pytest.raises(KeyError):
+            registry.get_experiment("EXP001")
+
+    def test_no_version_support_rejected(
+        self, spec: ExperimentSpec, registry: Registry, tmp_path: Path
+    ) -> None:
+        exe = tmp_path / "codt_old"
+        exe.write_text("#!/bin/bash\nexit 1\n")   # --version unsupported
+        exe.chmod(0o755)
+
+        with pytest.raises(ValueError, match="Rebuild CODT"):
+            create_experiment_runs(spec, registry, exe)
+
+    def test_permanent_data_root_recorded(
+        self, spec: ExperimentSpec, registry: Registry, codt_exe: Path
+    ) -> None:
+        create_experiment_runs(spec, registry, codt_exe)
+        exp = registry.get_experiment("EXP001")
+        assert exp["permanent_data_root"].endswith("group")
+
+    def test_relocate_defaults_to_permanent_root(
+        self, spec: ExperimentSpec, registry: Registry, codt_exe: Path
+    ) -> None:
+        import shutil
+
+        create_experiment_runs(spec, registry, codt_exe)
+        new_root = Path(spec.permanent_data_root)
+        new_root.mkdir()
+        shutil.move(str(spec.experiment_dir), str(new_root))
+
+        registry.relocate_experiment("EXP001")   # no new_root argument
+
+        exp = registry.get_experiment("EXP001")
+        assert exp["data_root"] == str(new_root.resolve())
+
+    def test_relocate_no_root_anywhere_rejected(
+        self, registry: Registry
+    ) -> None:
+        registry.create_experiment("bare", "no roots")
+        with pytest.raises(ValueError, match="permanent_data_root"):
+            registry.relocate_experiment("bare")
+
+    def test_submit_uses_spec_walltime_and_marks_running(
+        self, spec: ExperimentSpec, registry: Registry, codt_exe: Path,
+        monkeypatch,
+    ) -> None:
+        import subprocess as sp
+
+        runner, run_dirs = create_experiment_runs(spec, registry, codt_exe)
+
+        def fake_sbatch(cmd, **kwargs):
+            class P:
+                stdout = "Submitted batch job 999"
+                returncode = 0
+            return P()
+
+        monkeypatch.setattr(sp, "run", fake_sbatch)
+        runner.submit(run_dirs)   # no walltime argument
+
+        script = (runner.base_output_dir / "CODT_batch_0.sh").read_text()
+        assert "#SBATCH --time=01:00:00" in script   # from spec.slurm_options
+        assert registry.get_experiment("EXP001")["status"] == "running"
+        for run in registry.query_runs(experiment_id="EXP001"):
+            assert run["status"] == "queued"
+
+    def test_sbatch_records_completion_and_failure_detail(
+        self, spec: ExperimentSpec, registry: Registry, codt_exe: Path
+    ) -> None:
+        runner, run_dirs = create_experiment_runs(spec, registry, codt_exe)
+        script = runner._generate_sbatch(run_dirs, "01:00:00")
+
+        # Output metadata captured in-job after success.
+        assert "complete" in script
+        assert str(run_dirs[0] / "output") in script
+        # Failure detail points at the logs.
+        assert "--detail" in script and ".log" in script
+        # SLURM job stdout lands somewhere known.
+        assert "#SBATCH --output=" in script
+
+    def test_end_to_end_dry_run(
+        self, spec: ExperimentSpec, registry: Registry, codt_exe: Path
     ) -> None:
         """Plan verification: spec -> registered runs -> dry-run sbatch."""
         runner, run_dirs = create_experiment_runs(
-            spec, registry, "/usr/local/bin/codt"
+            spec, registry, codt_exe
         )
         scripts = runner.submit(run_dirs, walltime="01:00:00", dry_run=True)
 

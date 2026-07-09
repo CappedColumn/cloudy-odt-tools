@@ -113,7 +113,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "(run after copying; verifies data before updating).",
     )
     p_reloc.add_argument("experiment_id")
-    p_reloc.add_argument("new_root")
+    p_reloc.add_argument(
+        "new_root",
+        nargs="?",
+        default=None,
+        help="New data root (default: the experiment's recorded "
+        "permanent_data_root).",
+    )
     p_reloc.add_argument(
         "--data-status",
         default="on_group",
@@ -133,6 +139,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_ec.add_argument("title")
     p_ec.add_argument("--hypothesis", default=None)
     p_ec.add_argument("--data-root", default=None)
+    p_ec.add_argument("--permanent-data-root", default=None)
     p_es = exp_sub.add_parser("show")
     p_es.add_argument("experiment_id")
     p_el = exp_sub.add_parser("list")
@@ -239,8 +246,9 @@ def main(argv: list[str] | None = None) -> int:
                     data_status=args.data_status,
                     verify=not args.no_verify,
                 )
+                new_root = reg.get_experiment(args.experiment_id)["data_root"]
                 print(
-                    f"{args.experiment_id}: data_root={args.new_root}, "
+                    f"{args.experiment_id}: data_root={new_root}, "
                     f"runs data_status={args.data_status}"
                 )
             elif args.command == "experiment":
@@ -250,6 +258,7 @@ def main(argv: list[str] | None = None) -> int:
                         args.title,
                         hypothesis=args.hypothesis,
                         data_root=args.data_root,
+                        permanent_data_root=args.permanent_data_root,
                     )
                     print(f"Created experiment: {args.experiment_id}")
                 elif args.exp_command == "show":

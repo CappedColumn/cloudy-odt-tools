@@ -26,7 +26,8 @@ One row per hypothesis-driven experiment.
 | `status` | `planned` / `running` / `analyzed` / `concluded` (CHECK) |
 | `conclusion` | free text, set by `conclude_experiment` |
 | `analysis_artifacts` | JSON list of artifact paths |
-| `data_root` | root under which the experiment tree lives |
+| `data_root` | root under which the experiment tree currently lives |
+| `permanent_data_root` | intended post-QC home; default destination for `relocate` (schema v2) |
 | `created_at`, `concluded_at` | timestamps |
 
 ### runs

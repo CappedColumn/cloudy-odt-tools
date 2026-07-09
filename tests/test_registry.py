@@ -97,6 +97,31 @@ class TestSchema:
         with pytest.raises(FileNotFoundError):
             connect(tmp_path / "missing.db", create=False)
 
+    def test_v1_database_migrates_to_v2(self, tmp_path):
+        """A v1 DB (no permanent_data_root) upgrades in place on open."""
+        from codt_tools.registry.db import SCHEMA_SQL
+
+        path = tmp_path / "r.db"
+        raw = sqlite3.connect(path)
+        # Recreate a v1 schema: current DDL minus the v2 column.
+        v1_sql = "\n".join(
+            line for line in SCHEMA_SQL.splitlines()
+            if "permanent_data_root" not in line
+        )
+        raw.executescript(v1_sql)
+        raw.execute("PRAGMA user_version = 1")
+        raw.commit()
+        raw.close()
+
+        conn = connect(path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(experiments)")
+        }
+        assert "permanent_data_root" in cols
+        conn.close()
+
     def test_newer_schema_rejected(self, tmp_path):
         path = tmp_path / "r.db"
         connect(path).close()
@@ -323,6 +348,27 @@ class TestRecordCompletion:
         assert run["conventions"] == "CODT_output_v1"
         assert run["code_version"] == "0.6.0"
         assert run["git_commit"] == "894cafc"
+
+    def test_accepts_output_directory(self, registry, run_dir, tmp_path):
+        """The sbatch wrapper passes the output dir; nc found via _DONE."""
+        run_id = _register(registry, run_dir)
+        out_dir = tmp_path / "output"
+        out_dir.mkdir()
+        with nc.Dataset(out_dir / "my_sim.nc", "w") as ds:
+            ds.setncattr("conventions", "CODT_output_v1")
+        (out_dir / "my_sim_DONE").touch()
+
+        registry.record_completion(run_id, out_dir)
+        assert registry.get_run(run_id)["conventions"] == "CODT_output_v1"
+
+    def test_directory_without_marker_rejected(
+        self, registry, run_dir, tmp_path
+    ):
+        run_id = _register(registry, run_dir)
+        out_dir = tmp_path / "output"
+        out_dir.mkdir()
+        with pytest.raises(FileNotFoundError, match="_DONE"):
+            registry.record_completion(run_id, out_dir)
 
     def test_unsupported_conventions_warns_but_records(
         self, registry, run_dir, tmp_path

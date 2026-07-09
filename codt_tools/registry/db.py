@@ -16,7 +16,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION: int = 1
+SCHEMA_VERSION: int = 2
 
 # Milliseconds to wait on a locked database before failing. Bursts of tiny
 # status writes arrive when up to 40 packed SLURM tasks finish on one node.
@@ -61,6 +61,7 @@ CREATE TABLE experiments (
     conclusion TEXT,
     analysis_artifacts TEXT,          -- JSON list of paths
     data_root TEXT,
+    permanent_data_root TEXT,         -- intended post-QC home (v2)
     created_at TEXT NOT NULL,         -- ISO-8601 UTC
     concluded_at TEXT
 );
@@ -143,7 +144,9 @@ CREATE TABLE output_files (
 
 # Sequential migrations: MIGRATIONS[n] upgrades a version-n database to n+1.
 # Version 0 (fresh database) is initialized directly from SCHEMA_SQL.
-MIGRATIONS: dict[int, str] = {}
+MIGRATIONS: dict[int, str] = {
+    1: "ALTER TABLE experiments ADD COLUMN permanent_data_root TEXT;",
+}
 
 
 def connect(db_path: str | Path, create: bool = True) -> sqlite3.Connection:

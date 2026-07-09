@@ -265,17 +265,17 @@ def create_experiment_runs(
     tuple[CODTRunner, list[Path]]
         The configured runner (use it for ``submit``/``run_local``) and
         the run directories, in sweep order.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the executable does not exist.
+    ValueError
+        If the executable does not report a proper version (improper
+        build) — rebuild CODT with ``./build.sh`` and point
+        *executable* at the new binary.
     """
-    registry.create_experiment(
-        spec.experiment_id,
-        spec.title,
-        hypothesis=spec.hypothesis,
-        data_root=str(Path(spec.data_root).expanduser().resolve()),
-    )
-
     exp_dir = spec.experiment_dir
-    spec.to_yaml(exp_dir / "experiment.yaml")
-
     slurm = spec.slurm_options
     runner = CODTRunner(
         executable=executable,
@@ -286,6 +286,35 @@ def create_experiment_runs(
         registry=registry,
         experiment_id=spec.experiment_id,
     )
+    runner.default_walltime = slurm.get("walltime")
+
+    # Build gate: refuse to create runs from a binary whose provenance
+    # can't be recorded. Fails BEFORE anything is registered or written.
+    if not runner.executable.is_file():
+        raise FileNotFoundError(
+            f"CODT executable not found: {runner.executable}. "
+            "Fix the 'executable' argument."
+        )
+    if runner.codt_version is None or "PLACEHOLDER" in runner.codt_version:
+        raise ValueError(
+            f"Executable {runner.executable} does not report a valid "
+            f"version (got {runner.codt_version!r}) — it was not built "
+            "properly and its runs would be untraceable. Rebuild CODT "
+            "with ./build.sh (which injects version/commit) and pass "
+            "the new binary."
+        )
+
+    registry.create_experiment(
+        spec.experiment_id,
+        spec.title,
+        hypothesis=spec.hypothesis,
+        data_root=str(Path(spec.data_root).expanduser().resolve()),
+        permanent_data_root=(
+            str(Path(spec.permanent_data_root).expanduser().resolve())
+            if spec.permanent_data_root is not None else None
+        ),
+    )
+    spec.to_yaml(exp_dir / "experiment.yaml")
 
     configs = spec.expand()
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")

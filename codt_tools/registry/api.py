@@ -117,18 +117,22 @@ class Registry:
         title: str,
         hypothesis: str | None = None,
         data_root: str | Path | None = None,
+        permanent_data_root: str | Path | None = None,
     ) -> None:
         """Create a new experiment in status 'planned'."""
         with self._conn:
             self._conn.execute(
                 "INSERT INTO experiments "
-                "(experiment_id, title, hypothesis, data_root, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "(experiment_id, title, hypothesis, data_root, "
+                "permanent_data_root, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     experiment_id,
                     title,
                     hypothesis,
                     str(data_root) if data_root is not None else None,
+                    str(permanent_data_root)
+                    if permanent_data_root is not None else None,
                     _utcnow(),
                 ),
             )
@@ -408,8 +412,23 @@ class Registry:
         Reads the ``conventions``, ``code_version``, and ``git_commit``
         global attributes, checks the conventions gate (warns if
         unsupported), and updates the run record.
+
+        *output_path* may be the main output ``.nc`` file or the run's
+        output directory — in the latter case the file is located via
+        the ``{name}_DONE`` completion marker.
         """
         import netCDF4 as nc
+
+        output_path = Path(output_path)
+        if output_path.is_dir():
+            markers = sorted(output_path.glob("*_DONE"))
+            if len(markers) != 1:
+                raise FileNotFoundError(
+                    f"Expected exactly one *_DONE marker in {output_path}, "
+                    f"found {len(markers)}; pass the .nc file explicitly."
+                )
+            name = markers[0].name.removesuffix("_DONE")
+            output_path = output_path / f"{name}.nc"
 
         with nc.Dataset(output_path) as ds:
             attrs = {
@@ -445,7 +464,7 @@ class Registry:
     def relocate_experiment(
         self,
         experiment_id: str,
-        new_root: str | Path,
+        new_root: str | Path | None = None,
         *,
         data_status: str = "on_group",
         verify: bool = True,
@@ -465,8 +484,10 @@ class Registry:
         ----------
         experiment_id : str
             The experiment to relocate.
-        new_root : str or Path
+        new_root : str or Path, optional
             The new data root (parent of the experiment directory).
+            Defaults to the experiment's recorded
+            ``permanent_data_root``.
         data_status : str, optional
             New data location status for all runs (default
             ``"on_group"``).
@@ -480,8 +501,19 @@ class Registry:
             If a run directory or recorded input file is missing at
             the new root.
         ValueError
-            If a relocated file's checksum does not match the registry.
+            If a relocated file's checksum does not match the registry,
+            or *new_root* is omitted and the experiment has no
+            ``permanent_data_root``.
         """
+        if new_root is None:
+            new_root = self.get_experiment(experiment_id).get(
+                "permanent_data_root"
+            )
+            if not new_root:
+                raise ValueError(
+                    f"Experiment {experiment_id!r} has no recorded "
+                    "permanent_data_root; pass new_root explicitly."
+                )
         new_root = Path(new_root).expanduser().resolve()
         runs = self.query_runs(experiment_id=experiment_id)
 

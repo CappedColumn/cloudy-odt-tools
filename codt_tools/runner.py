@@ -41,6 +41,7 @@ Example usage::
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import warnings
 from pathlib import Path
@@ -92,6 +93,7 @@ class CODTRunner:
         self.cores_per_node: int = cores_per_node
         self.registry = registry
         self.experiment_id = experiment_id
+        self.default_walltime: str | None = None
         self.codt_version: str | None = self._query_version()
 
     # ------------------------------------------------------------------
@@ -301,6 +303,7 @@ class CODTRunner:
             f"#SBATCH --ntasks={len(run_dirs)}",
             f"#SBATCH --time={walltime}",
             f"#SBATCH --job-name=CODT_{batch_id}",
+            f"#SBATCH --output={self.base_output_dir}/CODT_batch_{batch_id}_%j.out",
             "",
         ]
 
@@ -312,11 +315,15 @@ class CODTRunner:
                 )
         else:
             db = self.registry.db_path
-            lines.append(f'REGISTRY="codt-registry --db {db}"')
+            # Absolute CLI path so status reporting works regardless of
+            # the job's PATH/environment; fall back to bare name.
+            cli = shutil.which("codt-registry") or "codt-registry"
+            lines.append(f'REGISTRY="{cli} --db {db}"')
             lines.append("")
             for i, sim_dir in enumerate(run_dirs):
                 run_name = sim_dir.name
                 nml_path = sim_dir / "inputs" / "params.nml"
+                output_dir = sim_dir / "output"
                 lines.extend([
                     "(",
                     f'  $REGISTRY update-status {run_name} running '
@@ -324,11 +331,15 @@ class CODTRunner:
                     f"  taskset -c {i} {self.executable} {nml_path}",
                     "  rc=$?",
                     f"  if [ $rc -eq 0 ]; then",
-                    f"    $REGISTRY update-status {run_name} completed "
-                    f"--exit-code $rc || true",
+                    f'    $REGISTRY update-status {run_name} completed '
+                    f'--exit-code $rc --job-id "$SLURM_JOB_ID" || true',
+                    f"    $REGISTRY complete {run_name} {output_dir} || true",
                     f"  else",
-                    f"    $REGISTRY update-status {run_name} failed "
-                    f"--exit-code $rc || true",
+                    f'    $REGISTRY update-status {run_name} failed '
+                    f'--exit-code $rc --job-id "$SLURM_JOB_ID" '
+                    f'--detail "exit $rc; logs: {output_dir}/*.log and '
+                    f'{self.base_output_dir}/CODT_batch_{batch_id}_$SLURM_JOB_ID.out" '
+                    f"|| true",
                     f"  fi",
                     ") &",
                 ])
@@ -339,7 +350,7 @@ class CODTRunner:
     def submit(
         self,
         run_dirs: list[Path],
-        walltime: str = "24:00:00",
+        walltime: str | None = None,
         dry_run: bool = False,
     ) -> list[str]:
         """Submit simulations to SLURM (or generate scripts only).
@@ -353,7 +364,9 @@ class CODTRunner:
         run_dirs : list[Path]
             Run directories (from :meth:`setup_run`).
         walltime : str, optional
-            SLURM wall-clock time (default ``"24:00:00"``).
+            SLURM wall-clock time. Defaults to ``self.default_walltime``
+            (set from the experiment spec's ``slurm_options`` by
+            ``create_experiment_runs``), else ``"24:00:00"``.
         dry_run : bool, optional
             If ``True``, write batch scripts but do not submit.
             Returns script file paths instead of job IDs.
@@ -364,6 +377,9 @@ class CODTRunner:
             SLURM job IDs (if ``dry_run=False``) or script file paths
             (if ``dry_run=True``).
         """
+        if walltime is None:
+            walltime = self.default_walltime or "24:00:00"
+
         # Split into batches
         batches: list[list[Path]] = []
         for i in range(0, len(run_dirs), self.cores_per_node):
@@ -400,6 +416,16 @@ class CODTRunner:
                         self.registry.update_status(
                             sim_dir.name, "queued", slurm_job_id=job_id
                         )
+
+        if (
+            not dry_run
+            and results
+            and self.registry is not None
+            and self.experiment_id is not None
+        ):
+            self.registry.update_experiment(
+                self.experiment_id, status="running"
+            )
 
         return results
 

@@ -73,6 +73,12 @@ with Registry("~/codt_registry.db") as reg:
     runner, run_dirs = create_experiment_runs(spec, reg, "~/dev/CODT/codt")
 ```
 
+Before anything is written, the executable is gated: it must exist and
+report a valid version (`codt --version`). A binary that was not built
+properly (missing/placeholder version info) is refused with
+instructions to rebuild via `./build.sh` — its runs would be
+untraceable.
+
 This registers the experiment (status `planned`), expands the sweep,
 and creates:
 
@@ -93,17 +99,23 @@ namelist parameters, input-file checksums, the executable's SHA256
 ## 3. Run
 
 ```python
-# SLURM (batched cores_per_node runs per job; each run reports status
-# back to the registry from inside the job):
-job_ids = runner.submit(run_dirs, walltime="12:00:00")
+# SLURM (batched cores_per_node runs per job; walltime defaults to
+# spec.slurm_options["walltime"]):
+job_ids = runner.submit(run_dirs)
 
 # Or locally, one at a time (blocking):
 proc = runner.run_local(spec.expand()[0])
 ```
 
-Statuses flow `registered → queued → running → completed/failed`;
-every transition is appended to `status_events` with timestamp and
-hostname.
+On submission the experiment flips to `running`. Inside the job each
+run reports `running → completed/failed` (with its SLURM job ID), and
+on success its output metadata (`conventions`, `code_version`,
+`git_commit`) is captured immediately — no separate `collect` step is
+required for bookkeeping. Every transition is appended to
+`status_events` with timestamp and hostname; failures record a
+`detail` pointing at the run's `.log` and the batch job's
+`CODT_batch_{i}_{jobid}.out` (both under the experiment tree /
+`base_output_dir`).
 
 ## 4. Query
 
@@ -142,9 +154,9 @@ markers present, budgets close, output loads cleanly):
 rsync -a /scratch/.../experiments/EXP001_tref_sensitivity \
     /uufs/.../group-space/CODT/experiments/
 
-# 2. Verify + update the registry in one step
-codt-registry relocate EXP001_tref_sensitivity \
-    /uufs/.../group-space/CODT/experiments
+# 2. Verify + update the registry (destination defaults to the
+#    permanent_data_root recorded at creation)
+codt-registry relocate EXP001_tref_sensitivity
 ```
 
 `relocate` refuses to update the registry unless every run directory
@@ -171,3 +183,20 @@ and sets the experiment to `concluded`. Once run data is moved or
 purged, update `codt-registry set-data-status <run_id> archived`
 (or `deleted`) — the parameters and conclusion remain as the permanent
 "never rerun this" record.
+
+## When things fail
+
+The workflow is designed so each failure surfaces at a well-defined
+point with a specific fix:
+
+| Failure | Where it surfaces | What to change |
+|---|---|---|
+| Executable missing | `create_experiment_runs` raises `FileNotFoundError` before anything is written | The `executable` argument |
+| Improper build (no version info) | `create_experiment_runs` raises `ValueError` before anything is written | Rebuild with `./build.sh`, pass the new binary |
+| Duplicate `experiment_id` | `create_experiment_runs` raises `IntegrityError` | Pick a new `experiment_id` in the YAML |
+| Invalid namelist values | `cfg.validate()` / CODT rejects at startup (stderr + run `failed`) | `base_parameters` / `parameter_sweep` in the YAML |
+| sbatch rejected (bad account/partition) | `runner.submit` raises `CalledProcessError` | `slurm_options` in the YAML |
+| Run crashes / exits nonzero | Run marked `failed` with exit code; `detail` names the run's `.log` and the batch `*.out` file | Diagnose from those logs (see `codt-registry show <run_id>`) |
+| Job killed (walltime, OOM, node death) | Run stuck in `running`; SLURM job gone | Cross-check `sacct`, backfill status from the `_DONE` marker; raise `walltime` in the YAML and resubmit |
+| Botched copy at relocation | `codt-registry relocate` refuses (missing files / checksum mismatch); registry untouched | Re-run the `rsync`, then relocate again |
+| Output unreadable by tools | `CODTSimulation` warns on the `conventions` gate | Use a codt_tools version matching the run's recorded `conventions` |
