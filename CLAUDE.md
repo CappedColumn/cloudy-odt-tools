@@ -72,6 +72,10 @@ Global attrs on NC files: `conventions`, `code_version` (git-describe string fro
 | **Entrainment** | Not yet implemented (planned) | Blob method with aerosol detrainment/entrainment (`do_entrainment` in `&PARAMETERS`, params in `&ENTRAINMENT`) |
 | **`pressure_limit`** | Not used | Stop simulation at target pressure (Pa) |
 
+## Simulation Registry
+
+`codt_tools/registry/` tracks experiments and runs in SQLite (docs in `docs/registry-*.md`). DB location convention: `--db` or `$CODT_REGISTRY_DB`; the DB lives on home/group space, never scratch. All access goes through `Registry` / the `codt-registry` CLI (pragmas, retry, txn coupling live in Python — never raw sqlite3 writes). Gate rule: `SUPPORTED_CONVENTIONS` (registry/versions.py) is the single source of truth for readable output conventions; `CODTSimulation.__init__` and `record_completion` warn on mismatch (`strict=True` raises). Bump it via the codt-versioning skill when output formats change. Experiments: `ExperimentSpec` YAML → `create_experiment_runs` → `{data_root}/{experiment_id}/{experiment.yaml, shared_inputs/, runs/{run_id}/}` with content-hash dedup of shared inputs as relative symlinks; run_id = `{stamp}_{model}_{descriptor}`.
+
 ## Runner Layout
 
 `CODTRunner.setup_run` creates `{base}/{run_name}/` with `inputs/` (params.nml, aerosol_input.nc) and an empty `output/` (model writes here). The namelist `output_directory` is set to the absolute `output/` path; `executable` and `base_output_dir` are resolved to absolute in `__init__`, so local runs and generated sbatch scripts are cwd-independent. `aerosol_file` stays relative (`aerosol_input.nc`) and CODT resolves it against the namelist's parent (`inputs/`).

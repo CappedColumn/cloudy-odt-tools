@@ -9,6 +9,7 @@ Cloudy One-Dimensional Turbulence (CODT) model.
 - **`CODTRunner`** — Run simulations locally or submit SLURM batch jobs with core pinning
 - **`CODTSimulation`** — Load output, compute diagnostics, and produce publication-quality plots
 - **Multi-simulation comparison** — Overlay time series, profiles, and spectra across parameter sweeps
+- **Simulation registry** — SQLite-backed tracking of experiments and runs (parameters, code versions, status history, data location) with the `codt-registry` CLI
 
 ## Installation
 
@@ -45,9 +46,37 @@ sims = [CODTSimulation(f"/path/to/output/{c.name}") for c in configs]
 CODTSimulation.compare(sims, "LWC", plot_type="timeseries")
 ```
 
+## Simulation Registry
+
+Track every run in a single SQLite database: full namelist parameters,
+executable checksum and `--version`, status history, and where the data
+lives. Experiments are defined declaratively in YAML (base config +
+parameter sweep) and expanded into registered runs:
+
+```python
+from codt_tools import ExperimentSpec, create_experiment_runs
+from codt_tools.registry import Registry
+
+spec = ExperimentSpec.from_yaml("experiment.yaml")
+with Registry("~/codt_registry.db") as reg:
+    runner, run_dirs = create_experiment_runs(spec, reg, "/path/to/CODT")
+    runner.submit(run_dirs, walltime="12:00:00")
+```
+
+```bash
+codt-registry list --experiment EXP001 --status failed
+codt-registry export --experiment EXP001 --csv runs.csv
+```
+
+See [docs/registry-quickstart.md](docs/registry-quickstart.md) for the
+full define → create → run → query → conclude workflow,
+[docs/registry-schema.md](docs/registry-schema.md) for the schema, and
+[docs/using-a-shared-registry.md](docs/using-a-shared-registry.md) for
+shared/group databases.
+
 ## Dependencies
 
-- numpy, xarray, netCDF4, matplotlib, f90nml
+- numpy, xarray, netCDF4, matplotlib, f90nml, pyyaml
 
 ## Testing
 
