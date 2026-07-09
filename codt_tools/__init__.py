@@ -8,6 +8,7 @@ except PackageNotFoundError:  # running from a source tree without install
     __version__ = "unknown"
 
 from codt_tools.config import CODTConfig, InjectionData, Namelist, ParcelInput
+from codt_tools.experiment import ExperimentSpec, create_experiment_runs
 from codt_tools.runner import CODTRunner
 from codt_tools.simulation import CODTSimulation
 
@@ -15,7 +16,9 @@ __all__ = [
     "CODTConfig",
     "CODTRunner",
     "CODTSimulation",
+    "ExperimentSpec",
     "InjectionData",
     "Namelist",
     "ParcelInput",
+    "create_experiment_runs",
 ]

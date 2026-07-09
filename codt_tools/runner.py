@@ -117,7 +117,12 @@ class CODTRunner:
     # Directory setup
     # ------------------------------------------------------------------
 
-    def setup_run(self, config: CODTConfig, run_id: str | None = None) -> Path:
+    def setup_run(
+        self,
+        config: CODTConfig,
+        run_id: str | None = None,
+        register: bool = True,
+    ) -> Path:
         """Create a run directory with input files and an output directory.
 
         Directory structure::
@@ -138,6 +143,10 @@ class CODTRunner:
         run_id : str, optional
             Registry run identifier and directory name
             (e.g. ``20260708_143022_codt_v2.1_control``).
+        register : bool, optional
+            If ``False``, skip registry registration even when a registry
+            is attached. Used when input files will be post-processed
+            (e.g. shared-input dedup) before registration.
 
         Returns
         -------
@@ -153,7 +162,7 @@ class CODTRunner:
         config.params.set(output_directory=str(output_dir))
         config.write(inputs_dir)
 
-        if self.registry is not None:
+        if register and self.registry is not None:
             self.registry.register_run(
                 run_name,
                 config,
