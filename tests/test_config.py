@@ -341,17 +341,49 @@ class TestCODTConfigValidate:
         cfg.set(simulation_mode="parcel", parcel_file="p.nc",
                 do_entrainment=True)
         cfg.parcel.set_env_profile(
+            height=[0.0, 2000.0],
             pressure=[100000.0, 80000.0],
             temperature=[300.0, 285.0],
             RH=[0.8, 0.5],
         )
         cfg.validate()
 
-    def test_parcel_first_time_nonzero_fails(self) -> None:
+    def test_parcel_environment_mode_needs_env(self) -> None:
+        cfg = CODTConfig()
+        cfg.set(simulation_mode="parcel", parcel_file="p.nc",
+                pressure_mode="environment")
+        with pytest.raises(ValueError, match="environmental sounding"):
+            cfg.validate()
+
+    def test_parcel_bad_vertical_axis_fails(self) -> None:
+        cfg = CODTConfig()
+        cfg.set(simulation_mode="parcel", parcel_file="p.nc",
+                vertical_axis="altitude")
+        with pytest.raises(ValueError, match="vertical_axis"):
+            cfg.validate()
+
+    def test_parcel_bad_pressure_mode_fails(self) -> None:
+        cfg = CODTConfig()
+        cfg.set(simulation_mode="parcel", parcel_file="p.nc",
+                pressure_mode="isobaric")
+        with pytest.raises(ValueError, match="pressure_mode"):
+            cfg.validate()
+
+    def test_parcel_leg_pointing_away_fails(self) -> None:
         cfg = CODTConfig()
         cfg.set(simulation_mode="parcel", parcel_file="p.nc")
-        cfg.set_parcel(time=[10.0, 300.0], velocity=[1.0, 0.5])
-        with pytest.raises(ValueError, match="First parcel segment time"):
+        cfg.set_parcel(segment_coord=[1000.0], velocity=[-1.0])
+        with pytest.raises(ValueError, match="points away from its target"):
+            cfg.validate()
+
+    def test_parcel_legs_validate_against_initial_height(self) -> None:
+        # Launching at 1200 m makes a 1000 m target a descent, so the
+        # ascending velocity that would pass from the ground now fails.
+        cfg = CODTConfig()
+        cfg.set(simulation_mode="parcel", parcel_file="p.nc",
+                initial_height=1200.0)
+        cfg.set_parcel(segment_coord=[1000.0], velocity=[1.0])
+        with pytest.raises(ValueError, match="points away from its target"):
             cfg.validate()
 
     def test_bad_trajectory_window(self) -> None:
@@ -498,11 +530,11 @@ class TestCODTConfigFromSimulation:
         self, sim_dir: Path, run_dir: Path
     ) -> None:
         pi = ParcelInput()
-        pi.set(time=[0.0, 300.0], velocity=[1.0, 0.5])
-        pi.write(run_dir / "parcel_input.nc")
+        pi.set(segment_coord=[1000.0, 1500.0], velocity=[1.0, 0.5])
+        pi.write(run_dir / "parcel_input.nc", initial_level=0.0)
 
         cfg = CODTConfig.from_simulation(sim_dir, run_dir=run_dir)
-        assert cfg.parcel.n_segments == 2
+        assert cfg.parcel.n_legs == 2
         np.testing.assert_allclose(cfg.parcel.velocity, [1.0, 0.5])
 
     def test_parcel_defaults_without_file(
@@ -510,7 +542,7 @@ class TestCODTConfigFromSimulation:
     ) -> None:
         cfg = CODTConfig.from_simulation(sim_dir, run_dir=run_dir)
         assert isinstance(cfg.parcel, ParcelInput)
-        assert cfg.parcel.n_segments == 1
+        assert cfg.parcel.n_legs == 1
 
     def test_can_modify_and_write(
         self, sim_dir: Path, run_dir: Path, tmp_path: Path

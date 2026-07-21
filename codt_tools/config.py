@@ -16,8 +16,20 @@ from typing import Any, Union
 import f90nml
 import numpy as np
 
-from codt_tools.aerosol_io import read_aerosol, write_aerosol
-from codt_tools.parcel_io import read_parcel, write_parcel
+from codt_tools.aerosol_io import (
+    SEED_HYDRATION_MODES,
+    SEED_KEYS,
+    make_seed_group,
+    read_aerosol,
+    write_aerosol,
+)
+from codt_tools.parcel_io import (
+    PRESSURE_MODES,
+    VERTICAL_AXES,
+    read_parcel,
+    validate_legs,
+    write_parcel,
+)
 
 
 # ======================================================================
@@ -86,9 +98,12 @@ class Namelist:
             "parcel_file":          "",
             "initial_rh":           1.0,
             "pressure_limit":       0.0,
+            "vertical_axis":        "height",
+            "pressure_mode":        "hydrostatic",
+            "initial_height":       0.0,
         },
         "entrainment": {
-            "ent_rate":             2.0,
+            "ent_rate":             2.0,   # 1/km
             "n_blob":               1,
             "psigma":               0.1,
             "random_entrainment":   True,
@@ -121,6 +136,9 @@ class Namelist:
             "coalescence_kernel":              "hall",
             "wmax_collision":                  10.0,
             "write_collisions":                False,
+            "do_seeding":                      False,
+            "seed_hydration":                  "equilibrium",
+            "seed_growth_time":                5.0,
         },
         "specialeffects": {
             "do_sidewalls":         False,
@@ -450,10 +468,21 @@ class InjectionData:
         self.solute_density: np.ndarray = np.array([2.163e3])
         self.edge_radii: np.ndarray = np.array([291.0, 500.0, 1000.0])
         self.category: np.ndarray = np.array([1, 2], dtype=np.int32)
+        self.bin_type: np.ndarray = np.array([1, 1], dtype=np.int32)
         self.cumulative_frequency: np.ndarray = np.array([[0.5, 1.0]])
         self.injection_time: np.ndarray = np.array([0.0])
         self.injection_rate: np.ndarray = np.array([6.66e4])
         self.dsd_bin_edges: np.ndarray = np.geomspace(0.049, 60.0, num=201)
+        self._init_seed_defaults()
+
+    def _init_seed_defaults(self) -> None:
+        """Clear the optional seed group."""
+        self.seed_edge_radii: np.ndarray | None = None
+        self.seed_category: np.ndarray | None = None
+        self.seed_bin_type: np.ndarray | None = None
+        self.seed_frequency: np.ndarray | None = None
+        self.seed_coord: np.ndarray | None = None
+        self.seed_concentration: np.ndarray | None = None
 
     def _read(self, path: Path) -> None:
         """Read from an aerosol_input.nc file."""
@@ -464,10 +493,13 @@ class InjectionData:
         self.solute_density = data["solute_density"]
         self.edge_radii = data["edge_radii"]
         self.category = data["category"]
+        self.bin_type = data["bin_type"]
         self.cumulative_frequency = data["cumulative_frequency"]
         self.injection_time = data["injection_time"]
         self.injection_rate = data["injection_rate"]
         self.dsd_bin_edges = data["dsd_bin_edges"]
+        for key in SEED_KEYS:
+            setattr(self, key, data[key])
 
     # ------------------------------------------------------------------
     # Access / modification
@@ -475,7 +507,7 @@ class InjectionData:
 
     # Fields that are 1D arrays in the NetCDF schema.  Scalars passed for
     # these are wrapped in a length-1 array automatically.
-    _INT_1D_FIELDS: set[str] = {"n_ions", "category"}
+    _INT_1D_FIELDS: set[str] = {"n_ions", "category", "bin_type"}
     _FLOAT_1D_FIELDS: set[str] = {
         "molar_mass", "solute_density", "edge_radii",
         "injection_time", "injection_rate", "dsd_bin_edges",
@@ -614,9 +646,38 @@ class InjectionData:
         """Return list of public attribute names."""
         return [
             "aerosol_name", "n_ions", "molar_mass", "solute_density",
-            "edge_radii", "category", "cumulative_frequency",
+            "edge_radii", "category", "bin_type", "cumulative_frequency",
             "injection_time", "injection_rate", "dsd_bin_edges",
+            *SEED_KEYS,
         ]
+
+    @property
+    def has_seed_group(self) -> bool:
+        """Whether a seed group is present.
+
+        ``&MICROPHYSICS do_seeding`` is the sole controller: seeding on with no
+        group is fatal, but a group present with seeding off is ignored (CODT
+        warns), so one file can serve both a seeded and an unseeded run.
+        """
+        return self.seed_coord is not None
+
+    def set_seed_group(self, **kwargs: Any) -> None:
+        """Build, validate, and attach a seed group.
+
+        Thin wrapper over :func:`aerosol_io.make_seed_group` that supplies the
+        background's ``n_types``, ``bin_type``, and ``category`` so the
+        cross-population rules are checked. See that function for the
+        arguments and the rules enforced.
+        """
+        kwargs.setdefault("n_types", self.n_types)
+        kwargs.setdefault("bin_type", self.bin_type)
+        kwargs.setdefault("category", self.category)
+        for key, value in make_seed_group(**kwargs).items():
+            setattr(self, key, value)
+
+    def clear_seed_group(self) -> None:
+        """Remove the seed group."""
+        self._init_seed_defaults()
 
     # ------------------------------------------------------------------
     # Conversion to/from dict (for aerosol_io)
@@ -658,6 +719,22 @@ class InjectionData:
             np.asarray(data["injection_rate"], dtype=np.float64)
         )
         obj.dsd_bin_edges = np.asarray(data["dsd_bin_edges"], dtype=np.float64)
+
+        # bin_type is optional; absent means every bin is composition row 1.
+        if data.get("bin_type") is None:
+            obj.bin_type = np.ones(len(obj.category), dtype=np.int32)
+        else:
+            obj.bin_type = np.asarray(data["bin_type"], dtype=np.int32)
+
+        obj._init_seed_defaults()
+        for key in SEED_KEYS:
+            if data.get(key) is not None:
+                dtype = (
+                    np.int32
+                    if key in ("seed_category", "seed_bin_type")
+                    else np.float64
+                )
+                setattr(obj, key, np.asarray(data[key], dtype=dtype))
         return obj
 
     # ------------------------------------------------------------------
@@ -714,20 +791,23 @@ class ParcelInput:
     """In-memory representation of a CODT parcel input file.
 
     Reads and writes the ``parcel_input.nc`` format
-    (``CODT_parcel_input_v1`` or ``CODT_parcel_input_v2``).
+    (``CODT_parcel_input_v3``). The trajectory is a sequence of **waypoint
+    legs**: leg *i* says "proceed to ``segment_coord[i]`` at ``velocity[i]``".
+    Targets need no monotonic order, velocities are signed, and completing the
+    last leg ends the simulation — possibly before ``tmax``.
 
     Parameters
     ----------
     path : str or Path, optional
         Path to an existing ``parcel_input.nc`` file. If ``None``, creates
-        an instance with a single segment of constant 1 m/s ascent.
+        an instance with a single leg rising to 1000 m at 1 m/s.
 
     Examples
     --------
-    Create from defaults:
+    Create from defaults, then fly up, down, and up again:
 
     >>> pi = ParcelInput()
-    >>> pi.set(time=[0.0, 300.0], velocity=[1.0, 0.5])
+    >>> pi.set(segment_coord=[1000.0, 400.0, 1500.0], velocity=[1.0, -0.5, 1.0])
 
     Load from file:
 
@@ -741,16 +821,24 @@ class ParcelInput:
             self._read(Path(path))
 
     def _init_defaults(self) -> None:
-        self.time: np.ndarray = np.array([0.0])
+        self.segment_coord: np.ndarray = np.array([1000.0])
         self.velocity: np.ndarray = np.array([1.0])
+        self.ent_rate: np.ndarray | None = None
+        self.n_blob: np.ndarray | None = None
+        self.psigma: np.ndarray | None = None
+        self.env_height: np.ndarray | None = None
         self.env_pressure: np.ndarray | None = None
         self.env_temperature: np.ndarray | None = None
         self.env_RH: np.ndarray | None = None
 
     def _read(self, path: Path) -> None:
         data = read_parcel(path)
-        self.time = data["time"]
+        self.segment_coord = data["segment_coord"]
         self.velocity = data["velocity"]
+        self.ent_rate = data["ent_rate"]
+        self.n_blob = data["n_blob"]
+        self.psigma = data["psigma"]
+        self.env_height = data["env_height"]
         self.env_pressure = data["env_pressure"]
         self.env_temperature = data["env_temperature"]
         self.env_RH = data["env_RH"]
@@ -759,12 +847,19 @@ class ParcelInput:
     # Access / modification
     # ------------------------------------------------------------------
 
+    _VALID_ATTRS: set[str] = {
+        "segment_coord", "velocity",
+        "ent_rate", "n_blob", "psigma",
+        "env_height", "env_pressure", "env_temperature", "env_RH",
+    }
+
     def set(self, **kwargs: Any) -> None:
         """Set one or more attributes by name.
 
-        Array-like values are converted to numpy arrays. Setting any of
-        ``env_pressure``, ``env_temperature``, ``env_RH`` to ``None``
-        clears the environmental sounding.
+        Array-like values are converted to numpy arrays. Setting any member of
+        the sounding or the entrainment schedule to ``None`` clears just that
+        value; use :meth:`clear_env_profile` or :meth:`clear_entrainment` to
+        clear a whole group.
 
         Parameters
         ----------
@@ -776,55 +871,100 @@ class ParcelInput:
         AttributeError
             If an attribute name is not valid.
         """
-        valid = {"time", "velocity", "env_pressure", "env_temperature", "env_RH"}
         for key, value in kwargs.items():
-            if key not in valid:
+            if key not in self._VALID_ATTRS:
                 raise AttributeError(
                     f"'{key}' is not a valid ParcelInput attribute. "
-                    f"Valid: {sorted(valid)}"
+                    f"Valid: {sorted(self._VALID_ATTRS)}"
                 )
             if value is None:
                 setattr(self, key, None)
+            elif key == "n_blob":
+                setattr(self, key,
+                        np.atleast_1d(np.asarray(value, dtype=np.int32)))
             else:
                 setattr(self, key,
                         np.atleast_1d(np.asarray(value, dtype=np.float64)))
 
     @property
-    def n_segments(self) -> int:
-        """Number of velocity segments."""
-        return len(self.time)
+    def n_legs(self) -> int:
+        """Number of waypoint legs."""
+        return len(self.segment_coord)
 
     @property
     def has_env_profile(self) -> bool:
-        """Whether an environmental sounding is present (v2 schema)."""
+        """Whether an environmental sounding is present."""
         return self.env_pressure is not None
+
+    @property
+    def has_entrainment_schedule(self) -> bool:
+        """Whether a per-leg entrainment schedule is present."""
+        return self.ent_rate is not None
 
     def set_env_profile(
         self,
+        height: np.ndarray | list,
         pressure: np.ndarray | list,
         temperature: np.ndarray | list,
         RH: np.ndarray | list,
     ) -> None:
-        """Set the environmental sounding for entrainment (v2 schema).
+        """Set the environmental sounding.
+
+        Required when ``do_entrainment`` is enabled or
+        ``&PARCEL pressure_mode='environment'``.
 
         Parameters
         ----------
+        height : array-like
+            Environmental height in m (strictly increasing).
         pressure : array-like
-            Environmental pressure in Pa (monotonically decreasing).
+            Environmental pressure in Pa (strictly decreasing).
         temperature : array-like
             Environmental temperature in K.
         RH : array-like
             Environmental relative humidity (0–1).
         """
+        self.env_height = np.asarray(height, dtype=np.float64)
         self.env_pressure = np.asarray(pressure, dtype=np.float64)
         self.env_temperature = np.asarray(temperature, dtype=np.float64)
         self.env_RH = np.asarray(RH, dtype=np.float64)
 
     def clear_env_profile(self) -> None:
-        """Remove the environmental sounding (downgrade to v1 schema)."""
+        """Remove the environmental sounding."""
+        self.env_height = None
         self.env_pressure = None
         self.env_temperature = None
         self.env_RH = None
+
+    def set_entrainment_schedule(
+        self,
+        ent_rate: np.ndarray | list,
+        n_blob: np.ndarray | list,
+        psigma: np.ndarray | list,
+    ) -> None:
+        """Set a per-leg entrainment schedule.
+
+        When present these override the constant ``&ENTRAINMENT`` values
+        leg-by-leg; ``random_entrainment`` still comes from the namelist.
+
+        Parameters
+        ----------
+        ent_rate : array-like
+            Fractional entrainment rate per leg, in **1/km** (not 1/m).
+        n_blob : array-like
+            Blobs per entrainment event per leg (1–10).
+        psigma : array-like
+            Blob fraction per leg, in (0, 1), with ``psigma * n_blob < 1``.
+        """
+        self.ent_rate = np.asarray(ent_rate, dtype=np.float64)
+        self.n_blob = np.asarray(n_blob, dtype=np.int32)
+        self.psigma = np.asarray(psigma, dtype=np.float64)
+
+    def clear_entrainment_schedule(self) -> None:
+        """Remove the per-leg entrainment schedule."""
+        self.ent_rate = None
+        self.n_blob = None
+        self.psigma = None
 
     # ------------------------------------------------------------------
     # I/O
@@ -832,23 +972,27 @@ class ParcelInput:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to the dict format used by :mod:`parcel_io`."""
-        return {
-            "time": self.time,
-            "velocity": self.velocity,
-            "env_pressure": self.env_pressure,
-            "env_temperature": self.env_temperature,
-            "env_RH": self.env_RH,
-        }
+        return {key: getattr(self, key) for key in self._VALID_ATTRS}
 
-    def write(self, path: Union[str, Path]) -> None:
+    def write(
+        self,
+        path: Union[str, Path],
+        initial_level: float | None = None,
+        vertical_axis: str = "height",
+    ) -> None:
         """Write the parcel input to a NetCDF file.
 
         Parameters
         ----------
         path : str or Path
             Destination file path. Parent directories are created if needed.
+        initial_level : float, optional
+            Launch level to validate leg directions against. If None,
+            validation is left to CODT at run time.
+        vertical_axis : {"height", "pressure"}
+            Axis that ``segment_coord`` is expressed on.
         """
-        write_parcel(path, self.to_dict())
+        write_parcel(path, self.to_dict(), initial_level, vertical_axis)
 
     # ------------------------------------------------------------------
     # Display
@@ -856,19 +1000,23 @@ class ParcelInput:
 
     def print(self) -> None:
         """Pretty-print the parcel input data."""
-        print(f"N Segments:    {self.n_segments}")
-        print(f"  Times (s):   {self.time}")
+        print(f"N Legs:        {self.n_legs}")
+        print(f"  Targets:     {self.segment_coord}")
         print(f"  Vel (m/s):   {self.velocity}")
-        if self.has_env_profile:
-            print(f"Env Profile:   {len(self.env_pressure)} levels (v2)")
+        if self.has_entrainment_schedule:
+            print(f"Entrainment:   per-leg schedule")
+            print(f"  Rate (1/km): {self.ent_rate}")
+        else:
+            print("Entrainment:   none (namelist constants)")
+        if self.env_pressure is not None:
+            print(f"Env Profile:   {len(self.env_pressure)} levels")
             print(f"  P range:     {self.env_pressure[0]:.0f} - "
                   f"{self.env_pressure[-1]:.0f} Pa")
         else:
-            print("Env Profile:   none (v1)")
+            print("Env Profile:   none")
 
     def __repr__(self) -> str:
-        schema = "v2" if self.has_env_profile else "v1"
-        return f"ParcelInput(n_segments={self.n_segments}, schema={schema})"
+        return f"ParcelInput(n_legs={self.n_legs}, schema=v3)"
 
 
 # ======================================================================
@@ -1279,21 +1427,89 @@ class CODTConfig:
                     f"initial_rh must be in [0, 1], got {initial_rh}."
                 )
 
-            if self.params.get("do_entrainment") and not self.parcel.has_env_profile:
+            vertical_axis = self.params.get("vertical_axis")
+            if vertical_axis not in VERTICAL_AXES:
                 raise ValueError(
-                    "do_entrainment requires an environmental sounding "
-                    "in the parcel input (v2 schema). Use "
-                    "cfg.parcel.set_env_profile(...)."
+                    f"vertical_axis must be one of {list(VERTICAL_AXES)}, "
+                    f"got {vertical_axis!r}."
                 )
 
-            if self.parcel.n_segments < 1:
-                raise ValueError("Parcel input must have at least one segment.")
-
-            if abs(self.parcel.time[0]) > 1e-10:
+            pressure_mode = self.params.get("pressure_mode")
+            if pressure_mode not in PRESSURE_MODES:
                 raise ValueError(
-                    f"First parcel segment time must be 0, "
-                    f"got {self.parcel.time[0]}."
+                    f"pressure_mode must be one of {list(PRESSURE_MODES)}, "
+                    f"got {pressure_mode!r}."
                 )
+
+            needs_sounding = (
+                self.params.get("do_entrainment")
+                or pressure_mode == "environment"
+            )
+            if needs_sounding and not self.parcel.has_env_profile:
+                raise ValueError(
+                    "do_entrainment=.true. or pressure_mode='environment' "
+                    "requires an environmental sounding in the parcel input. "
+                    "Use cfg.parcel.set_env_profile(...)."
+                )
+
+            if self.parcel.n_legs < 1:
+                raise ValueError("Parcel input must have at least one leg.")
+
+            # Mirror CODT's leg-direction validation. On the pressure axis the
+            # launch level is the initial pressure; in environment mode CODT
+            # resets that from the sounding at initial_height before validating,
+            # so do the same here.
+            initial_height = self.params.get("initial_height")
+            if vertical_axis == "pressure":
+                env_height = self.parcel.env_height
+                env_pressure = self.parcel.env_pressure
+                if (pressure_mode == "environment"
+                        and env_height is not None
+                        and env_pressure is not None):
+                    initial_level = float(
+                        np.interp(initial_height, env_height, env_pressure)
+                    )
+                else:
+                    initial_level = self.params.get("pres")
+            else:
+                initial_level = initial_height
+
+            validate_legs(
+                self.parcel.segment_coord,
+                self.parcel.velocity,
+                initial_level,
+                vertical_axis,
+            )
+
+        # -- Seeding: do_seeding is the sole controller (mirrors CODT) --
+        # Enabling it requires a seed group to act on; without one there is
+        # nothing to seed, so that is fatal. With seeding off, a seed group in
+        # the file is simply ignored (never read) — CODT warns but runs, which
+        # is what lets one file serve both a seeded and an unseeded run. So a
+        # dormant group is a warning here, not an error.
+        do_seeding = self.params.get("do_seeding")
+        if do_seeding and not self.injection.has_seed_group:
+            raise ValueError(
+                "do_seeding=.true. but the aerosol input has no seed group. "
+                "CODT aborts on this. Add one with "
+                "cfg.injection.set_seed_group(...) or disable do_seeding."
+            )
+        if self.injection.has_seed_group and not do_seeding:
+            warnings.warn(
+                "The aerosol input carries a seed group but do_seeding=.false.; "
+                "the group will be ignored. Set do_seeding=True to use it, or "
+                "cfg.injection.clear_seed_group() to drop it."
+            )
+
+        if do_seeding:
+            seed_hydration = self.params.get("seed_hydration")
+            if seed_hydration not in SEED_HYDRATION_MODES:
+                raise ValueError(
+                    f"seed_hydration must be one of "
+                    f"{list(SEED_HYDRATION_MODES)}, got {seed_hydration!r}."
+                )
+            if self.params.get("seed_growth_time") <= 0.0:
+                raise ValueError("seed_growth_time must be > 0.")
 
         # -- Injection data consistency --
         n_bins = self.injection.n_bins

@@ -83,6 +83,14 @@ _FIELD_REGISTRY: dict[str, str] = {
     "parcel_height": "t",
     "parcel_pressure": "t",
     "parcel_velocity": "t",
+    # Written only for pressure_mode='hydrostatic' with a sounding; its drift
+    # from parcel_height measures the departure from the sounding's p(z).
+    "parcel_height_env": "t",
+    # Per-leg entrainment schedule, written only when the parcel file carries
+    # one. ent_rate is in 1/km.
+    "ent_rate": "t",
+    "n_blob": "t",
+    "psigma": "t",
 }
 # DSD_1, DSD_2, ... are discovered dynamically from the netCDF file.
 
@@ -436,7 +444,9 @@ class CODTSimulation:
             Start time (seconds) for the time-averaging window used
             by gradient detection. Boundary layers develop over time,
             so this should typically skip the initial transient.
-            Defaults to ``tmax / 2``.
+            Defaults to half the last available time. Note this is the
+            output's own time axis, not ``tmax``: a parcel run that completes
+            its trajectory stops early, so the two need not agree.
         t_end : float, optional
             End time (seconds) for the averaging window. Defaults to
             the last available time.
