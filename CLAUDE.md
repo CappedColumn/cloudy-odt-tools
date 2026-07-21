@@ -71,10 +71,11 @@ Global attrs on NC files: `conventions`, `code_version` (git-describe string fro
 | **`Tdiff`** | Top-bottom ΔT | Not used |
 | **Entrainment** | Not yet implemented (planned) | Blob method with aerosol detrainment/entrainment (`do_entrainment` in `&PARAMETERS`, params in `&ENTRAINMENT`) |
 | **`pressure_limit`** | Not used | Stop simulation at target pressure (Pa) |
+| **Seeding** | Events keyed to **time** [s] | Events keyed to the **vertical coordinate** (m or Pa per `vertical_axis`). Same driver, same `seed_coord` variable — only the axis differs |
 
 ## Simulation Registry
 
-`codt_tools/registry/` tracks experiments and runs in SQLite (docs in `docs/registry-*.md`). DB location convention: `--db` or `$CODT_REGISTRY_DB`; the DB lives on home/group space, never scratch. All access goes through `Registry` / the `codt-registry` CLI (pragmas, retry, txn coupling live in Python — never raw sqlite3 writes). Gate rule: `SUPPORTED_CONVENTIONS` (registry/versions.py) is the single source of truth for readable output conventions; `CODTSimulation.__init__` and `record_completion` warn on mismatch (`strict=True` raises). Bump it via the codt-versioning skill when output formats change. Experiments: `ExperimentSpec` YAML → `create_experiment_runs` → `{data_root}/{experiment_id}/{experiment.yaml, shared_inputs/, runs/{run_id}/}` with content-hash dedup of shared inputs as relative symlinks; run_id = `{stamp}_{model}_{descriptor}`.
+`codt_tools/registry/` tracks experiments and runs in SQLite (docs in `docs/registry-*.md`). DB location convention: `--db` or `$CODT_REGISTRY_DB`; the DB lives on home/group space, never scratch. All access goes through `Registry` / the `codt-registry` CLI (pragmas, retry, txn coupling live in Python — never raw sqlite3 writes). Gate rule: `SUPPORTED_CONVENTIONS` (registry/versions.py) is the single source of truth for readable output conventions; `CODTSimulation.__init__` and `record_completion` warn on mismatch (`strict=True` raises). `SUPPORTED_INPUT_CONVENTIONS` is the input-side equivalent (parcel v3 only, aerosol v1) — `register_run` records each NetCDF input's conventions plus the aerosol seed-group flag, and cross-checks `do_seeding`. Bump both via the codt-versioning skill when formats change. Experiments: `ExperimentSpec` YAML → `create_experiment_runs` → `{data_root}/{experiment_id}/{experiment.yaml, shared_inputs/, runs/{run_id}/}` with content-hash dedup of shared inputs as relative symlinks; run_id = `{stamp}_{model}_{descriptor}`.
 
 ## Runner Layout
 
@@ -92,6 +93,7 @@ Global attrs on NC files: `conventions`, `code_version` (git-describe string fro
 - `pressure_limit` → `&PARCEL` (not `&PARAMETERS`)
 - `ent_rate, n_blob, psigma, random_entrainment` → standalone `&ENTRAINMENT` (not `&PARCEL`)
 - `radiation_method` must be `'1d'` or `'3d'` (not `'two_stream'`)
+- `do_seeding, seed_hydration, seed_growth_time` → `&MICROPHYSICS` (not a `&SEEDING` group — there isn't one)
 
 `{name}_DONE` discovery: `collect()` (runner.py) and `CODTSimulation._discover_files` both correctly use `{name}_DONE`.
 
@@ -130,6 +132,7 @@ dt_record = np.dtype([('id_keep','<i4'),('id_kill','<i4'),('r_keep','<f8'),('r_k
 
 ## Merged
 
+- **CODT v3 interface** (codt_tools v0.5.0, for CODT 2.0.0): waypoint-leg parcel input, aerosol seeding, registry input-schema gating. See "CODT v3 interface" below.
 - **v0.6.0**: Aerosol detrainment/entrainment during blob events, standalone `entrainment.f90` module, `&ENTRAINMENT` namelist, entrainment budget variables in output NC.
 - **v0.5.x**: Flat output directory (no auto-subdirectory), relative paths, removed input file copies, `{name}_DONE` marker.
 - **v0.4.0**: Version embedding (`code_version`, `git_commit` in output NC), radiation module, DGM Rosenbrock solver, parcel entrainment framework, pressure_limit.
@@ -139,6 +142,56 @@ dt_record = np.dtype([('id_keep','<i4'),('id_kill','<i4'),('r_keep','<f8'),('r_k
 ## Remaining Work
 
 - Snakemake example Snakefile
+
+## CODT v3 interface
+
+Supported as of codt_tools **v0.5.0**, targeting CODT **2.0.0** (the
+`feature/time-varying-entrainment` @ `45631ca` line). Running these inputs needs
+a CODT 2.0.0 binary.
+
+- **Parcel input (breaking).** Only `CODT_parcel_input_v3` is accepted;
+  `read_parcel` rejects v1/v2 outright rather than converting, so archival
+  parcel files need an older codt_tools checkout. v3 is **waypoint legs**:
+  `segment_coord` holds per-leg *targets* (height or pressure per `&PARCEL
+  vertical_axis`), `velocity` is signed, the leg counter (not position) keys the
+  lookup, and completing the last leg **ends the run before `tmax`**. `ent_rate`
+  is **1/km** (was 1/m — a 1000× physical change if a template is reused
+  verbatim). New `&PARCEL`: `vertical_axis`, `pressure_mode`, `initial_height`.
+- **Aerosol seeding (additive).** The conventions string is still
+  `CODT_aerosol_input_v1` — CODT never bumped it, and `droplets.f90:1243` hard-
+  rejects anything else, so v1 is *current*, not legacy. Seeded and unseeded
+  files are both v1. Adds an optional `bin_type(bin)` and an optional
+  all-or-nothing **seed group** (`seed_bin`/`seed_edge`/`seed_event` dims)
+  carrying a second aerosol population with its own bins, CDF, and event
+  schedule. New `&MICROPHYSICS`: `do_seeding`, `seed_hydration`,
+  `seed_growth_time`. Build one via `cfg.injection.set_seed_group(...)`.
+- **Version strings can't answer the questions you'll ask.** Output conventions
+  stayed `CODT_output_v1`, so new output vars (`parcel_height_env`, per-leg
+  `ent_rate`) must be detected by *variable presence*. Aerosol stayed v1, so
+  seeding must be detected by *seed-group presence* (probe the `seed_bin`
+  dimension, as CODT's own `read_seed_group` does). The registry records both
+  facts per run — see `docs/registry-schema.md`.
+- **`do_seeding` is the sole controller of seeding — the gate is one-way.**
+  `do_seeding=.true.` with no seed group aborts the run (fatal). But
+  `do_seeding=.false.` with a seed group present is **fine**: CODT never reads
+  the group, just warns, so one aerosol file can serve both a seeded and an
+  unseeded run (the bundled `input/aerosol_input.nc` ships with a group for
+  exactly this). `CODTConfig.validate()` mirrors this (raises on the fatal case,
+  warns on a dormant group), and `Registry.register_run` re-checks against the
+  staged file (catching a swapped shared input) and records `has_seed_group`.
+- **Two gotchas that will bite a writer:**
+  - `category` is dimensioned `(bin)`, **not** `(aerosol_type)` — the old CODT
+    docs had this wrong; the code always read it as `(bin)`.
+  - CODT's docs list dimensions in **Fortran** order (`bin, time`) while
+    `ncdump`/Python see the reverse (`time, bin`). Taking those docs literally
+    from Python yields a transposed CDF that reads fine and samples wrong. Trust
+    `ncdump`.
+- **`aerosol_type > 1` used to be silently ignored** (the reader hardcoded
+  `start=[1]`, reading only row 1). All rows are now read — if anything here ever
+  wrote multi-row composition tables, those rows were being dropped and now aren't.
+- **Testing gotcha:** a parcel e2e run needs `tmax` long enough to actually fly
+  the legs, or it silently hits the time limit mid-leg and seed events never fire
+  (`Seeded: 0`) — which looks like a passing run. Distance/speed sets the floor.
 
 ## Workshop materials (`examples/`)
 

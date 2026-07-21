@@ -70,6 +70,45 @@ on run deletion.
 | `checksum` | SHA256 **of resolved content** (through symlinks) |
 | `size_bytes` | resolved size |
 | `is_symlink`, `link_target` | physical layout after shared-input dedup (`link_target` relative, e.g. `../../../shared_inputs/aerosol_input.nc`) |
+| `schema_conventions` | the file's NetCDF `conventions` attribute; NULL for the namelist and for rows registered before schema v3 |
+| `has_seed_group` | aerosol only: 1/0 for seed-group presence; NULL for other file types and pre-v3 rows |
+
+#### Input schema gating
+
+`SUPPORTED_INPUT_CONVENTIONS` (`registry/versions.py`) is the source of truth
+for readable input formats, alongside `SUPPORTED_CONVENTIONS` for outputs. The
+two input types behave differently, and the asymmetry is deliberate:
+
+- **`parcel_input`** — the version string is load-bearing. Only
+  `CODT_parcel_input_v3` is accepted. v1/v2 are *retired*, not merely old: v3
+  re-keys the segment lookup to a leg counter and redefines `ent_rate` as 1/km
+  (a 1000× change), so an old file is silently wrong rather than unreadable.
+  `check_input_conventions` refuses them with that explanation.
+- **`aerosol_input`** — the version string is inert. `CODT_aerosol_input_v1` is
+  the only string there has ever been, and it is still current: CODT v3 added
+  seeding as *optional* dims/vars rather than bumping the schema
+  (`droplets.f90:1243` hard-rejects anything else). Seeded and unseeded files
+  are both v1, so the version cannot distinguish them — `has_seed_group` is
+  what carries that information.
+
+Seed-group detection probes for the `seed_bin` dimension, mirroring CODT's
+`read_seed_group`, which returns early when that dimension is absent. The group
+is all-or-nothing: once `seed_bin` exists, the remaining seed dims and variables
+are mandatory.
+
+`register_run` also cross-checks `&MICROPHYSICS do_seeding` against the staged
+aerosol file (`check_seeding_consistency`). `do_seeding` is the sole controller,
+so the gate is **one-way**: `do_seeding=.true.` with no seed group is fatal
+(nothing to seed), but `do_seeding=.false.` with a group present is **fine** —
+CODT ignores the dormant group, which is what lets one file serve both a seeded
+and an unseeded run. Only the fatal direction warns. `CODTConfig.validate()`
+makes the same check against the in-memory config (and warns, not raises, on a
+dormant group); the registry check is against the file actually on disk, which
+additionally catches a shared or symlinked aerosol input swapped after the
+config was built.
+
+The fatal-direction check warns by default and raises
+`IncompatibleConventionsError` under `strict=True`.
 
 ### namelist_parameters
 
