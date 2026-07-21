@@ -22,6 +22,9 @@ from codt_tools.registry.db import RUN_STATUSES, connect
 from codt_tools.registry.versions import (
     archive_executable,
     check_conventions,
+    check_input_conventions,
+    check_seeding_consistency,
+    inspect_input_file,
     sha256_file,
 )
 
@@ -243,6 +246,13 @@ class Registry:
         from the config's mode-gated groups, and archives the executable
         (content-addressed, deduplicated) unless archiving is disabled.
 
+        NetCDF inputs are additionally inspected: their ``conventions`` string
+        is recorded and gated (retired parcel v1/v2 warn), and the aerosol
+        file's seed-group presence is recorded and cross-checked against
+        ``&MICROPHYSICS do_seeding`` — ``do_seeding`` with no seed group is fatal
+        in CODT, so it warns here rather than after a submit (a dormant group
+        with seeding off is fine and passes quietly).
+
         Parameters
         ----------
         run_id : str
@@ -309,14 +319,23 @@ class Registry:
                 "VALUES (?, 'registered', ?, ?)",
                 (run_id, now, socket.gethostname()),
             )
+            seed_group_seen: bool | None = None
             for name, file_type in _INPUT_FILE_TYPES.items():
                 path = inputs_dir / name
                 if not path.exists():
                     continue
+                conventions = has_seed_group = None
+                if path.suffix == ".nc":
+                    conventions, seed_group = inspect_input_file(path)
+                    check_input_conventions(file_type, conventions)
+                    if file_type == "aerosol_input":
+                        has_seed_group = int(seed_group)
+                        seed_group_seen = seed_group
                 self._conn.execute(
                     "INSERT INTO input_files (run_id, file_type, file_path, "
-                    "checksum, size_bytes, is_symlink, link_target) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "checksum, size_bytes, is_symlink, link_target, "
+                    "schema_conventions, has_seed_group) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         run_id,
                         file_type,
@@ -325,7 +344,13 @@ class Registry:
                         path.stat().st_size,
                         int(path.is_symlink()),
                         str(path.readlink()) if path.is_symlink() else None,
+                        conventions,
+                        has_seed_group,
                     ),
+                )
+            if seed_group_seen is not None:
+                check_seeding_consistency(
+                    bool(config.params.get("do_seeding")), seed_group_seen
                 )
             for group, params in config.params._groups_for_write().items():
                 for pname, pvalue in params.items():

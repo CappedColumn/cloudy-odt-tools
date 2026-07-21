@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import sqlite3
+import warnings
 from pathlib import Path
 
 import netCDF4 as nc
@@ -15,7 +16,10 @@ from codt_tools.registry import (
     IncompatibleConventionsError,
     Registry,
     check_conventions,
+    check_input_conventions,
+    check_seeding_consistency,
     connect,
+    inspect_input_file,
     sha256_file,
 )
 from codt_tools.registry.versions import archive_executable
@@ -97,29 +101,70 @@ class TestSchema:
         with pytest.raises(FileNotFoundError):
             connect(tmp_path / "missing.db", create=False)
 
-    def test_v1_database_migrates_to_v2(self, tmp_path):
-        """A v1 DB (no permanent_data_root) upgrades in place on open."""
+    @staticmethod
+    def _make_old_db(path, version):
+        """Build a database at an older schema version from the current DDL.
+
+        Columns added after *version* are stripped line-wise, so each
+        migration step is exercised against a schema that genuinely lacks
+        what it adds.
+        """
         from codt_tools.registry.db import SCHEMA_SQL
 
-        path = tmp_path / "r.db"
-        raw = sqlite3.connect(path)
-        # Recreate a v1 schema: current DDL minus the v2 column.
-        v1_sql = "\n".join(
-            line for line in SCHEMA_SQL.splitlines()
-            if "permanent_data_root" not in line
+        added_after = {
+            1: ("permanent_data_root", "schema_conventions", "has_seed_group"),
+            2: ("schema_conventions", "has_seed_group"),
+        }[version]
+        old_sql = "\n".join(
+            line
+            for line in SCHEMA_SQL.splitlines()
+            if not any(col in line for col in added_after)
         )
-        raw.executescript(v1_sql)
-        raw.execute("PRAGMA user_version = 1")
+        raw = sqlite3.connect(path)
+        raw.executescript(old_sql)
+        raw.execute(f"PRAGMA user_version = {version}")
+        raw.commit()
+        raw.close()
+
+    def _columns(self, conn, table):
+        return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+    def test_v1_database_migrates_to_current(self, tmp_path):
+        """A v1 DB upgrades in place through every intermediate step."""
+        path = tmp_path / "r.db"
+        self._make_old_db(path, 1)
+
+        conn = connect(path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert "permanent_data_root" in self._columns(conn, "experiments")
+        assert {"schema_conventions", "has_seed_group"} <= self._columns(
+            conn, "input_files"
+        )
+        conn.close()
+
+    def test_v2_database_migrates_to_v3(self, tmp_path):
+        """A v2 DB gains the input-schema columns; existing rows read NULL."""
+        path = tmp_path / "r.db"
+        self._make_old_db(path, 2)
+        raw = sqlite3.connect(path)
+        raw.execute(
+            "INSERT INTO runs (run_id, run_dir, created_at) VALUES ('r1', 'd', 't')"
+        )
+        raw.execute(
+            "INSERT INTO input_files (run_id, file_type, file_path) "
+            "VALUES ('r1', 'aerosol_input', 'aerosol_input.nc')"
+        )
         raw.commit()
         raw.close()
 
         conn = connect(path)
         assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
-        cols = {
-            row[1]
-            for row in conn.execute("PRAGMA table_info(experiments)")
-        }
-        assert "permanent_data_root" in cols
+        row = conn.execute(
+            "SELECT schema_conventions, has_seed_group FROM input_files"
+        ).fetchone()
+        # NULL means "not recorded", distinct from a recorded absence (0).
+        assert row["schema_conventions"] is None
+        assert row["has_seed_group"] is None
         conn.close()
 
     def test_newer_schema_rejected(self, tmp_path):
@@ -163,6 +208,69 @@ class TestVersions:
         f = tmp_path / "data.bin"
         f.write_bytes(b"codt" * 1000)
         assert sha256_file(f) == hashlib.sha256(b"codt" * 1000).hexdigest()
+
+    def test_parcel_v3_accepted(self):
+        assert check_input_conventions("parcel_input", "CODT_parcel_input_v3") is True
+
+    @pytest.mark.parametrize("retired", ["CODT_parcel_input_v1", "CODT_parcel_input_v2"])
+    def test_retired_parcel_versions_explain_why(self, retired):
+        with pytest.warns(UserWarning, match="ent_rate as 1/km"):
+            assert check_input_conventions("parcel_input", retired) is False
+
+    def test_aerosol_v1_is_current_not_legacy(self):
+        """v1 is the v3-era aerosol string; seeded files still declare it."""
+        assert check_input_conventions("aerosol_input", "CODT_aerosol_input_v1") is True
+
+    def test_unknown_file_type_passes_unchecked(self):
+        assert check_input_conventions("namelist", None) is True
+
+    def test_input_strict_raises(self):
+        with pytest.raises(IncompatibleConventionsError):
+            check_input_conventions("parcel_input", "CODT_parcel_input_v1", strict=True)
+
+    @pytest.mark.parametrize(
+        "do_seeding,has_group",
+        # do_seeding is the sole controller, so the gate is one-way. Only
+        # seeding-on with no group is fatal; a dormant group (off + present) is
+        # explicitly fine — one file serving a seeded and an unseeded run.
+        [(True, True), (False, False), (False, True)],
+    )
+    def test_seeding_one_way_gate_passes(self, do_seeding, has_group):
+        assert check_seeding_consistency(do_seeding, has_group) is True
+
+    def test_dormant_seed_group_does_not_warn(self, recwarn):
+        """Seeding off with a group present is valid and silent at this layer."""
+        assert check_seeding_consistency(False, True) is True
+        assert len(recwarn) == 0
+
+    def test_seeding_flag_without_group_warns(self):
+        with pytest.warns(UserWarning, match="no seed group"):
+            assert check_seeding_consistency(True, False) is False
+
+    def test_seeding_strict_raises(self):
+        with pytest.raises(IncompatibleConventionsError):
+            check_seeding_consistency(True, False, strict=True)
+
+    def test_inspect_detects_seed_group(self, tmp_path):
+        """Probes the seed_bin dimension, as CODT's own reader does."""
+        config = CODTConfig()
+        plain = tmp_path / "plain.nc"
+        config.injection.write(plain)
+        assert inspect_input_file(plain) == ("CODT_aerosol_input_v1", False)
+
+        config.injection.set_seed_group(
+            seed_edge_radii=[500.0, 1000.0, 2000.0],
+            seed_category=[7, 8],
+            seed_bin_type=[2, 2],
+            seed_frequency=[[0.5, 1.0], [0.25, 1.0]],
+            seed_coord=[500.0, 900.0],
+            seed_concentration=[10.0, 5.0],
+            n_types=2,
+        )
+        seeded = tmp_path / "seeded.nc"
+        config.injection.write(seeded)
+        # Same conventions string either way — presence is the only signal.
+        assert inspect_input_file(seeded) == ("CODT_aerosol_input_v1", True)
 
     def test_archive_executable_dedups(self, tmp_path):
         exe = tmp_path / "CODT"
@@ -234,6 +342,80 @@ class TestRuns:
         rdir, _ = run_dir
         expected = sha256_file(rdir / "inputs" / "params.nml")
         assert by_type["namelist"]["checksum"] == expected
+
+    def test_input_conventions_recorded(self, registry, run_dir):
+        """NetCDF inputs record their schema; the namelist has none."""
+        run_id = _register(registry, run_dir)
+        rows = {
+            r["file_type"]: r
+            for r in registry._conn.execute(
+                "SELECT * FROM input_files WHERE run_id = ?", (run_id,)
+            )
+        }
+        aerosol = rows["aerosol_input"]
+        assert aerosol["schema_conventions"] == "CODT_aerosol_input_v1"
+        # Recorded absence (0), not "unknown" (NULL).
+        assert aerosol["has_seed_group"] == 0
+        assert rows["namelist"]["schema_conventions"] is None
+        assert rows["namelist"]["has_seed_group"] is None
+
+    def test_seeded_run_is_queryable(self, registry, run_dir):
+        """A seeded run is identifiable despite sharing v1 with unseeded runs."""
+        rdir, config = run_dir
+        config.injection.set_seed_group(
+            seed_edge_radii=[500.0, 1000.0, 2000.0],
+            seed_category=[7, 8],
+            seed_bin_type=[2, 2],
+            seed_frequency=[[0.5, 1.0], [0.25, 1.0]],
+            seed_coord=[500.0, 900.0],
+            seed_concentration=[10.0, 5.0],
+            n_types=2,
+        )
+        config.injection.write(rdir / "inputs" / "aerosol_input.nc")
+        config.params.set(do_seeding=True)
+        run_id = _register(registry, (rdir, config))
+
+        seeded = registry._conn.execute(
+            "SELECT run_id FROM input_files WHERE has_seed_group = 1"
+        ).fetchall()
+        assert [r["run_id"] for r in seeded] == [run_id]
+
+    def test_do_seeding_without_seed_group_warns_at_registration(
+        self, registry, run_dir
+    ):
+        """CODT aborts on this; surface it before a submit, not after."""
+        rdir, config = run_dir
+        config.params.set(do_seeding=True)
+        with pytest.warns(UserWarning, match="no seed group"):
+            _register(registry, (rdir, config))
+
+    def test_dormant_seed_group_registers_cleanly(self, registry, run_dir):
+        """Seed group present but do_seeding off is valid — CODT ignores it.
+
+        The group is still recorded (a run that could seed but didn't), and
+        registration does not warn about the one-way gate.
+        """
+        rdir, config = run_dir
+        config.injection.set_seed_group(
+            seed_edge_radii=[500.0, 1000.0, 2000.0],
+            seed_category=[7, 8],
+            seed_bin_type=[2, 2],
+            seed_frequency=[[0.5, 1.0], [0.25, 1.0]],
+            seed_coord=[500.0, 900.0],
+            seed_concentration=[10.0, 5.0],
+            n_types=2,
+        )
+        config.injection.write(rdir / "inputs" / "aerosol_input.nc")
+        # do_seeding stays False (the run_dir default).
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            run_id = _register(registry, (rdir, config))
+        row = registry._conn.execute(
+            "SELECT has_seed_group FROM input_files WHERE run_id = ? AND "
+            "file_type = 'aerosol_input'",
+            (run_id,),
+        ).fetchone()
+        assert row["has_seed_group"] == 1
 
     def test_symlinked_input_recorded(self, registry, tmp_path, run_dir):
         rdir, config = run_dir

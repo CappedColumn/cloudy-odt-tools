@@ -16,7 +16,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION: int = 2
+SCHEMA_VERSION: int = 3
 
 # Milliseconds to wait on a locked database before failing. Bursts of tiny
 # status writes arrive when up to 40 packed SLURM tasks finish on one node.
@@ -105,6 +105,8 @@ CREATE TABLE input_files (
     size_bytes INTEGER,
     is_symlink INTEGER NOT NULL DEFAULT 0,
     link_target TEXT,                 -- relative, e.g. ../../shared_inputs/x.nc
+    schema_conventions TEXT,          -- NetCDF 'conventions' attr (v3)
+    has_seed_group INTEGER,           -- aerosol only; NULL for other types (v3)
     UNIQUE (run_id, file_path)
 );
 
@@ -146,6 +148,13 @@ CREATE TABLE output_files (
 # Version 0 (fresh database) is initialized directly from SCHEMA_SQL.
 MIGRATIONS: dict[int, str] = {
     1: "ALTER TABLE experiments ADD COLUMN permanent_data_root TEXT;",
+    # v3: record input-file schema identity. Existing rows stay NULL — the
+    # conventions of an already-registered file are not recoverable here, and
+    # NULL correctly reads as "not recorded" rather than "absent".
+    2: (
+        "ALTER TABLE input_files ADD COLUMN schema_conventions TEXT;"
+        "ALTER TABLE input_files ADD COLUMN has_seed_group INTEGER;"
+    ),
 }
 
 
