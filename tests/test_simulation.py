@@ -519,7 +519,7 @@ class TestEddyReader:
         hdr = result["header"]
         assert hdr["mode"] == "parcel"
         assert hdr["integral_length_scale"] == 0.1
-        assert hdr["kolmogorov_length_scale"] == 0.001
+        assert hdr["smallest_eddy_scale"] == 0.001
         assert hdr["dissipation_rate"] == 0.01
         assert len(result["events"]) == 2
 

@@ -275,6 +275,41 @@ class CODTSimulation:
         except KeyError:
             return None
 
+    #: Derived LEM scales CODT writes as ``LEM.*`` global attributes, in
+    #: report order. Not namelist inputs, so they are absent from ``params``.
+    _LEM_SCALE_KEYS: tuple[str, ...] = (
+        "smallest_eddy_scale",
+        "smallest_eddy_gridpoints",
+        "diffusivity_enhancement",
+        "grid_eddy_scale",
+        "diffusivity_length_scale",
+        "actual_kolmogorov_scale",
+    )
+
+    def lem_scales(self) -> dict[str, float | int]:
+        """Derived LEM turbulence scales from the ``LEM.*`` global attributes.
+
+        Added by CODT 3.0.0 for parcel runs. The output conventions string did
+        not change, so these are detected by presence: an empty dict means the
+        run predates 3.0.0 (or is chamber mode), not that anything is wrong.
+
+        Returns
+        -------
+        dict
+            Whichever of ``smallest_eddy_scale`` (the governing scale, m),
+            ``smallest_eddy_gridpoints`` (cells), ``diffusivity_enhancement``
+            (unitless, >= 1), ``grid_eddy_scale``,
+            ``diffusivity_length_scale`` and ``actual_kolmogorov_scale``
+            (diagnostic only) the file carries.
+        """
+        attrs = self._ds.attrs
+        out: dict[str, float | int] = {}
+        for key in self._LEM_SCALE_KEYS:
+            value = attrs.get(f"LEM.{key}")
+            if value is not None:
+                out[key] = value.item() if hasattr(value, "item") else value
+        return out
+
     @property
     def N(self) -> int | None:
         """Number of grid cells."""
@@ -1202,8 +1237,15 @@ class CODTSimulation:
             ``"header"`` — dict with ``mode`` (``"chamber"`` or
             ``"parcel"``), ``N``, ``H``, and mode-specific parameters:
             chamber has ``C2``, ``ZC2``, ``Tdiff``, ``Tref``; parcel
-            has ``integral_length_scale``, ``kolmogorov_length_scale``,
+            has ``integral_length_scale``, ``smallest_eddy_scale``,
             ``dissipation_rate``.
+
+            The parcel field 1 slot held ``kolmogorov_length_scale`` (a
+            namelist input) before CODT 3.0.0; it is now the derived
+            ``smallest_eddy_scale``. The count, order and dtype are
+            unchanged, so files written by an older CODT read without error
+            but the value under this key is the old namelist input, not the
+            derived scale. Check the run's ``code_version``.
 
             ``"events"`` — structured array with ``M``, ``L``, ``time``.
 
@@ -1246,7 +1288,7 @@ class CODTSimulation:
             header = {
                 "mode": "parcel", "N": N, "H": H,
                 "integral_length_scale": float(vals[0]),
-                "kolmogorov_length_scale": float(vals[1]),
+                "smallest_eddy_scale": float(vals[1]),
                 "dissipation_rate": float(vals[2]),
             }
 
@@ -1629,11 +1671,13 @@ class CODTSimulation:
                 print()
                 print("LEM Turbulence:")
                 for key in ("integral_length_scale",
-                            "kolmogorov_length_scale",
                             "dissipation_rate"):
                     val = self._param(key)
                     if val is not None:
                         print(f"  {key:25s} = {val}")
+                # Derived scales (CODT 3.0.0+); absent on older runs.
+                for key, val in self.lem_scales().items():
+                    print(f"  {key:25s} = {val}")
                 print()
                 print("Parcel:")
                 for key in ("parcel_file", "initial_rh",

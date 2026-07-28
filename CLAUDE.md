@@ -107,9 +107,10 @@ Unformatted Fortran stream. Mode-aware header:
 3. Mode-specific fields (f8 array):
    - Chamber: C2, ZC2, Tdiff, Tref (4 values)
    - Parcel: integral_length_scale, smallest_eddy_scale, dissipation_rate (3 values)
-     - Field 1 was `kolmogorov_length_scale` before CODT `feature/lem-empm-port`.
-       Same count/order/dtype, different quantity — see the TODO section below;
-       the reader in `simulation.py` still uses the old label.
+     - Field 1 was `kolmogorov_length_scale` before CODT 3.0.0. Same
+       count/order/dtype, different quantity, so old files read without error
+       under the new label. `load_eddies` uses the new label unconditionally —
+       check `code_version` when reading archived runs.
 
 Per-eddy record: M(i4), L(i4), time(f8). Raw grid indices for replay via `implement_eddy(L, M)`.
 
@@ -135,6 +136,7 @@ dt_record = np.dtype([('id_keep','<i4'),('id_kill','<i4'),('r_keep','<f8'),('r_k
 
 ## Merged
 
+- **CODT 3.0.0 LEM turbulence scales** (codt_tools v0.6.0): `kolmogorov_length_scale` removed from `&TURBULENCE_LEM`; smallest eddy derived from grid + diffusivities. See "CODT 3.0.0 LEM turbulence scales" below.
 - **CODT v3 interface** (codt_tools v0.5.0, for CODT 2.0.0): waypoint-leg parcel input, aerosol seeding, registry input-schema gating. See "CODT v3 interface" below.
 - **v0.6.0**: Aerosol detrainment/entrainment during blob events, standalone `entrainment.f90` module, `&ENTRAINMENT` namelist, entrainment budget variables in output NC.
 - **v0.5.x**: Flat output directory (no auto-subdirectory), relative paths, removed input file copies, `{name}_DONE` marker.
@@ -145,16 +147,14 @@ dt_record = np.dtype([('id_keep','<i4'),('id_kill','<i4'),('r_keep','<f8'),('r_k
 ## Remaining Work
 
 - Snakemake example Snakefile
-- **CODT LEM turbulence-scale change — see the TODO section below.** Blocks
-  compatibility with CODT `feature/lem-empm-port`.
+- `test_runs/workshop_verify/setup_cases.py` still calls the pre-v3 parcel API
+  (`set_parcel(time=...)`); unrelated to the LEM change, but it will not run.
 
-## TODO — CODT LEM turbulence-scale change (NOT YET IMPLEMENTED HERE)
+## CODT 3.0.0 LEM turbulence scales
 
-> **Status: documented only. No codt_tools source has been changed.** CODT
-> (branch `feature/lem-empm-port`, slice 2) removed a namelist parameter and
-> changed the meaning of an eddy-header field. codt_tools is currently
-> **incompatible** with that CODT: `write_namelist` emits `.nml` files the new
-> binary refuses to read.
+> **Status: implemented in codt_tools v0.6.0**, verified against a CODT v3.0.0
+> binary (`e1c03be`) in both modes. CODT 3.0.0 removed a namelist parameter and
+> changed the meaning of an eddy-header field.
 
 **What changed in CODT**
 
@@ -196,21 +196,27 @@ CODT now also **aborts at startup** when `smallest_eddy_gridpoints > N` or
 `integral_length_scale / smallest_eddy_scale < 3`. Generated configs should keep
 `integral_length_scale` comfortably above `max(6*H/N, diffusivity_length_scale)`.
 
-**Sites another agent must update**
+**What codt_tools does about it**
 
-1. `codt_tools/config.py:121` — **breaks run generation.** Remove
-   `"kolmogorov_length_scale": 0.001,` from the `turbulence_lem` defaults. Any
-   namelist written with this key produces a CODT run that exits at startup.
-2. `codt_tools/simulation.py:1249` — eddy-header parcel field 1 is no longer
-   `kolmogorov_length_scale`; it is `smallest_eddy_scale`. **Field count, order
-   and dtype are unchanged (3 × f8)**, so the reader will *not* raise — it will
-   silently mislabel a different quantity. Rename the key, and consider gating on
-   `code_version` so pre-change files keep the old label.
-3. `codt_tools/simulation.py:1632` — the parcel `LEM Turbulence:` summary list;
-   drop `kolmogorov_length_scale`, optionally add the derived attributes below.
-4. `tests/test_simulation.py:522` — asserts `hdr["kolmogorov_length_scale"] ==
-   0.001`; update to the new key and expected value.
-5. `CLAUDE.md` "Eddy Binary" spec above — updated in place; the reader is not.
+- `kolmogorov_length_scale` is gone from the `turbulence_lem` defaults, so
+  `write_namelist` no longer emits it.
+- `config.lem_turbulence_scales(n, h, dissipation_rate)` reproduces CODT's
+  derivation (a mirror of `derive_turbulence_scales` in `src/LEM.f90`) and
+  returns all six quantities. **It must track that subroutine.** It deliberately
+  reproduces CODT's single-precision `1./3.` and `4./3.` literals; agreement with
+  the output attributes is then ~4e-9 relative, the floor set by gfortran's `**`
+  vs libm `pow`.
+- `CODTConfig.validate()` mirrors the new startup aborts: parcel raises on
+  `smallest_eddy_gridpoints > N` and `smallest_eddy_scale >= integral_length_scale`
+  and warns when the scale separation is < 3 (**this warning fires on the
+  defaults**, matching CODT on its bundled `params.nml`); chamber raises when
+  `lmin < 6` or `lmin % 3 != 0` (new `src/ODT.f90` guard).
+- `load_eddies()` renames parcel header field 1 to `smallest_eddy_scale`
+  **unconditionally**. Field count/order/dtype are unchanged (3 × f8), so a
+  pre-3.0.0 file still reads without error, but the value under that key is the
+  old namelist input — check `code_version`.
+- `CODTSimulation.lem_scales()` returns whichever `LEM.*` attributes the file
+  carries (empty dict for chamber or pre-3.0.0 runs); `info()` prints them.
 
 **New optional global attributes** on parcel output — additive, so
 `CODT_output_v1` is unchanged. Detect by presence, do not require:
@@ -222,10 +228,16 @@ Consistency check: `smallest_eddy_scale == smallest_eddy_gridpoints * H/N`.
 
 **Version impact.** No conventions string changes — `CODT_output_v1` and all
 input strings are untouched, so `SUPPORTED_CONVENTIONS` /
-`SUPPORTED_INPUT_CONVENTIONS` need no edit. But this is a breaking namelist
-change, hence a CODT **MAJOR** bump, with a matching codt_tools bump once the
-sites above are fixed. There is no back-compatible reader path: the
-incompatibility lives in CODT's namelist parser, not here.
+`SUPPORTED_INPUT_CONVENTIONS` were **not** edited. CODT took a MAJOR bump
+(3.0.0) for the breaking namelist; codt_tools went 0.5.0 → 0.6.0. There is no
+back-compatible writer path: the incompatibility lives in CODT's namelist
+parser, so **codt_tools 0.6.0 requires a CODT 3.0.0 binary** and 0.5.x requires
+a 2.x one.
+
+**Also in CODT 3.0.0, no I/O impact:** `a760c51` unified droplet eddy transport
+for LEM and ODT and fixed the map direction (droplets were advected through the
+inverse permutation for eddy lengths ≥ 9). Results change in **both** modes, so
+pre-3.0.0 output is not comparable — but no file format moved.
 
 **Migration for existing configs:** delete the `kolmogorov_length_scale` line.
 To influence the model's smallest eddy, change `N`/`H` (which sets `6*dz`);

@@ -12,6 +12,11 @@ CODT v3 bumped the parcel input to ``CODT_parcel_input_v3`` (waypoint legs) but
 left the output conventions at ``CODT_output_v1``. A reader therefore cannot use
 the output conventions string to tell a v3 run from a v2 one — it must probe for
 variable presence, or consult the registered ``parcel_input`` conventions.
+
+CODT 3.0.0 was conventions-neutral in the same way: it removed a namelist
+parameter and added derived ``LEM.*`` global attributes without moving any
+conventions string. So the output conventions string now fails to distinguish
+three CODT majors, and presence probing is the only reliable test.
 """
 
 from __future__ import annotations

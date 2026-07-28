@@ -7,7 +7,75 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from codt_tools.config import CODTConfig, InjectionData, Namelist, ParcelInput
+from codt_tools.config import (
+    CODTConfig,
+    InjectionData,
+    Namelist,
+    ParcelInput,
+    lem_turbulence_scales,
+)
+
+
+# ======================================================================
+# Derived LEM turbulence scales (mirror of CODT src/LEM.f90)
+# ======================================================================
+
+
+class TestLEMTurbulenceScales:
+    """Tests for lem_turbulence_scales()."""
+
+    def test_grid_limited_regime(self) -> None:
+        # eps = 0.01, H = 1, N = 1025: 6*dz just exceeds the diffusivity
+        # length scale, so the floor is exactly 6 cells and f ~ 1.
+        s = lem_turbulence_scales(1025, 1.0, 0.01)
+        assert s["smallest_eddy_gridpoints"] == 6
+        assert s["diffusivity_enhancement"] == pytest.approx(1.001, abs=1e-3)
+
+    def test_diffusivity_limited_regime_overshoots(self) -> None:
+        # N = 1045 puts 6*dz just below the handoff, so the 3-cell quantum
+        # rounds up to 9 cells and f jumps -- f is a step function of the
+        # grid, not ~1.
+        s = lem_turbulence_scales(1045, 1.0, 0.01)
+        assert s["smallest_eddy_gridpoints"] == 9
+        assert s["diffusivity_enhancement"] == pytest.approx(1.675, abs=1e-3)
+
+    def test_enhancement_never_below_one(self) -> None:
+        for n in range(200, 3000, 37):
+            s = lem_turbulence_scales(n, 1.0, 0.01)
+            assert s["diffusivity_enhancement"] >= 1.0
+
+    def test_gridpoints_consistent_with_scale(self) -> None:
+        n, h = 2000, 1.0
+        s = lem_turbulence_scales(n, h, 0.01)
+        assert s["smallest_eddy_scale"] == pytest.approx(
+            s["smallest_eddy_gridpoints"] * h / n
+        )
+        assert s["smallest_eddy_gridpoints"] % 3 == 0
+
+    def test_matches_codt_reference_values(self) -> None:
+        # Pinned against the LEM.* global attributes of a real CODT v3.0.0
+        # (e1c03be) parcel run at N=2000, H=1, eps=0.01. Guards the
+        # single-precision `1./3.` / `4./3.` literals: dropping them shifts
+        # diffusivity_length_scale by ~4e-8 relative, which this catches.
+        s = lem_turbulence_scales(2000, 1.0, 0.01)
+        assert s["diffusivity_length_scale"] == pytest.approx(
+            0.005849128279333603, rel=1e-7
+        )
+        assert s["actual_kolmogorov_scale"] == pytest.approx(
+            0.00075762133825086, rel=1e-7
+        )
+        assert s["diffusivity_enhancement"] == pytest.approx(
+            1.0345388541686187, rel=1e-7
+        )
+        assert s["smallest_eddy_gridpoints"] == 12
+        assert s["smallest_eddy_scale"] == pytest.approx(0.006)
+
+    def test_kolmogorov_scale_is_diagnostic_only(self) -> None:
+        # (nu**3/eps)**0.25 is always ~8x below the diffusivity handoff, so
+        # it can never win the max that sets the smallest eddy.
+        s = lem_turbulence_scales(2000, 1.0, 0.01)
+        assert s["actual_kolmogorov_scale"] < s["diffusivity_length_scale"]
+        assert s["actual_kolmogorov_scale"] < s["smallest_eddy_scale"]
 
 
 # ======================================================================
@@ -206,6 +274,21 @@ class TestCODTConfigWrite:
         assert "turbulence_odt" not in nml
         assert "specialeffects" not in nml
 
+    def test_parcel_omits_removed_kolmogorov_scale(self, tmp_path: Path) -> None:
+        # CODT 3.0.0 removed kolmogorov_length_scale from &TURBULENCE_LEM;
+        # a namelist still declaring it is a fatal read error.
+        cfg = CODTConfig()
+        cfg.set(simulation_mode="parcel")
+        cfg.write(tmp_path)
+
+        assert "kolmogorov_length_scale" not in (
+            tmp_path / "params.nml"
+        ).read_text()
+
+        import f90nml
+        nml = f90nml.read(tmp_path / "params.nml")
+        assert "kolmogorov_length_scale" not in nml["turbulence_lem"]
+
     def test_radiation_excluded_when_disabled(self, tmp_path: Path) -> None:
         cfg = CODTConfig()
         cfg.set(do_radiation=False)
@@ -385,6 +468,54 @@ class TestCODTConfigValidate:
         cfg.set_parcel(segment_coord=[1000.0], velocity=[1.0])
         with pytest.raises(ValueError, match="points away from its target"):
             cfg.validate()
+
+    # -- Derived LEM scales (CODT 3.0.0) --
+
+    def test_parcel_domain_too_small_for_smallest_eddy_fails(self) -> None:
+        # N = 4 cannot hold the 6-cell structural floor.
+        cfg = CODTConfig()
+        cfg.set(simulation_mode="parcel", parcel_file="p.nc", n=4, h=1.0)
+        with pytest.raises(ValueError, match="cannot contain the smallest eddy"):
+            cfg.validate()
+
+    def test_parcel_no_inertial_range_fails(self) -> None:
+        # A coarse grid pushes 6*dz above integral_length_scale.
+        cfg = CODTConfig()
+        cfg.set(simulation_mode="parcel", parcel_file="p.nc",
+                n=100, h=1.0, integral_length_scale=0.01)
+        with pytest.raises(ValueError, match="No inertial range"):
+            cfg.validate()
+
+    def test_parcel_narrow_inertial_range_warns(self) -> None:
+        # The defaults themselves sit here (l_small = 6 mm vs L = 10 mm),
+        # matching the warning CODT emits on its bundled params.nml.
+        cfg = CODTConfig()
+        cfg.set(simulation_mode="parcel", parcel_file="p.nc")
+        with pytest.warns(UserWarning, match="inertial range is nearly absent"):
+            cfg.validate()
+
+    def test_lem_scales_not_checked_without_turbulence(self) -> None:
+        cfg = CODTConfig()
+        cfg.set(simulation_mode="parcel", parcel_file="p.nc",
+                n=4, h=1.0, do_turbulence=False)
+        cfg.validate()  # should not raise
+
+    def test_chamber_lmin_below_floor_fails(self) -> None:
+        cfg = CODTConfig()
+        cfg.set(lmin=3)
+        with pytest.raises(ValueError, match="smallest representable eddy"):
+            cfg.validate()
+
+    def test_chamber_lmin_not_multiple_of_three_fails(self) -> None:
+        cfg = CODTConfig()
+        cfg.set(lmin=8)
+        with pytest.raises(ValueError, match="multiple of 3"):
+            cfg.validate()
+
+    def test_chamber_lmin_valid_passes(self) -> None:
+        cfg = CODTConfig()
+        cfg.set(lmin=9)
+        cfg.validate()
 
     def test_bad_trajectory_window(self) -> None:
         cfg = CODTConfig()
