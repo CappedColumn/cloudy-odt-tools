@@ -1321,7 +1321,10 @@ class CODTConfig:
 
         Examples
         --------
-        >>> cfg.set_parcel(time=[0.0, 300.0], velocity=[1.0, 0.5])
+        Waypoint legs: ascend to 500 m at 1 m/s, then to 900 m at 0.5 m/s.
+        ``time`` is not a v3 field — the lookup is keyed to the leg counter.
+
+        >>> cfg.set_parcel(segment_coord=[500.0, 900.0], velocity=[1.0, 0.5])
         """
         self.parcel.set(**kwargs)
 
