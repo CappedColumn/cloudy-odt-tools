@@ -106,7 +106,10 @@ Unformatted Fortran stream. Mode-aware header:
 2. `N` (i4), `H` (f8) — shared fields
 3. Mode-specific fields (f8 array):
    - Chamber: C2, ZC2, Tdiff, Tref (4 values)
-   - Parcel: integral_length_scale, kolmogorov_length_scale, dissipation_rate (3 values)
+   - Parcel: integral_length_scale, smallest_eddy_scale, dissipation_rate (3 values)
+     - Field 1 was `kolmogorov_length_scale` before CODT `feature/lem-empm-port`.
+       Same count/order/dtype, different quantity — see the TODO section below;
+       the reader in `simulation.py` still uses the old label.
 
 Per-eddy record: M(i4), L(i4), time(f8). Raw grid indices for replay via `implement_eddy(L, M)`.
 
@@ -117,7 +120,7 @@ N, H = np.fromfile(f, dtype=[('N','<i4'),('H','<f8')], count=1)[0]
 if mode_flag == 0:  # chamber
     hdr = np.fromfile(f, dtype='<f8', count=4)  # C2, ZC2, Tdiff, Tref
 else:  # parcel
-    hdr = np.fromfile(f, dtype='<f8', count=3)  # L_int, eta, epsilon
+    hdr = np.fromfile(f, dtype='<f8', count=3)  # L_int, smallest_eddy_scale, epsilon
 dt_eddy = np.dtype([('M','<i4'),('L','<i4'),('time','<f8')])
 ```
 
@@ -142,6 +145,91 @@ dt_record = np.dtype([('id_keep','<i4'),('id_kill','<i4'),('r_keep','<f8'),('r_k
 ## Remaining Work
 
 - Snakemake example Snakefile
+- **CODT LEM turbulence-scale change — see the TODO section below.** Blocks
+  compatibility with CODT `feature/lem-empm-port`.
+
+## TODO — CODT LEM turbulence-scale change (NOT YET IMPLEMENTED HERE)
+
+> **Status: documented only. No codt_tools source has been changed.** CODT
+> (branch `feature/lem-empm-port`, slice 2) removed a namelist parameter and
+> changed the meaning of an eddy-header field. codt_tools is currently
+> **incompatible** with that CODT: `write_namelist` emits `.nml` files the new
+> binary refuses to read.
+
+**What changed in CODT**
+
+`kolmogorov_length_scale` was **removed** from `&TURBULENCE_LEM`. A namelist that
+still declares it is a **fatal read error** (the Fortran namelist read cannot
+match the object name). The smallest turbulence scale is now derived:
+
+| derived quantity | formula |
+|---|---|
+| `actual_kolmogorov_scale` | `(nu**3 / dissipation_rate) ** 0.25` — **diagnostic only, never governs** |
+| `grid_eddy_scale` | `6 * dz`, where `dz = H / N` |
+| `diffusivity_length_scale` | `(max(kT, Dv) / (0.1 * dissipation_rate ** (1/3))) ** 0.75` |
+| `smallest_eddy_gridpoints` | `max(6, 3 * ceil(max(grid_eddy_scale, diffusivity_length_scale) / (3 * dz)))` |
+| `smallest_eddy_scale` | `smallest_eddy_gridpoints * dz` |
+| `diffusivity_enhancement` | `(smallest_eddy_scale / diffusivity_length_scale) ** (4/3)` — always ≥ 1 |
+
+Constants in CODT `src/globals.f90`: `nu = 1.488e-5`, `kT = 1.96e-5`,
+`Dv = 2.2705e-5` m²/s.
+
+`smallest_eddy_scale` drives the eddy-sampler lower bound, the sampler's
+gridpoint floor, and the Reynolds number
+`(integral_length_scale / smallest_eddy_scale) ** (4/3)`.
+
+The **LEM** diffusivities are molecular scaled by the same
+`diffusivity_enhancement`: `kT * f` and `Dv * f`. Both take the same factor, so
+Pr and Sc are preserved, and `f >= 1` means LEM diffusion is never slower than
+molecular. **Droplet growth is unaffected** — the DGM computes its own T- and
+p-dependent conductivity and vapor diffusivity internally (CODT
+`src/DGM.f90:204-205`). Chamber mode is unaffected too.
+
+`f` is a **step function** of the grid, not ≈1: in the diffusivity-limited regime
+the 3-cell quantum can be up to half of `diffusivity_length_scale`, so `f` reaches
+`(3/2) ** (4/3) = 1.717` near the crossover — at `eps=0.01, H=1`, `N=1025` gives
+1.001 but `N=1045` gives 1.675. Read it from `LEM.diffusivity_enhancement`; do
+not assume a value.
+
+CODT now also **aborts at startup** when `smallest_eddy_gridpoints > N` or
+`smallest_eddy_scale >= integral_length_scale`, and warns when
+`integral_length_scale / smallest_eddy_scale < 3`. Generated configs should keep
+`integral_length_scale` comfortably above `max(6*H/N, diffusivity_length_scale)`.
+
+**Sites another agent must update**
+
+1. `codt_tools/config.py:121` — **breaks run generation.** Remove
+   `"kolmogorov_length_scale": 0.001,` from the `turbulence_lem` defaults. Any
+   namelist written with this key produces a CODT run that exits at startup.
+2. `codt_tools/simulation.py:1249` — eddy-header parcel field 1 is no longer
+   `kolmogorov_length_scale`; it is `smallest_eddy_scale`. **Field count, order
+   and dtype are unchanged (3 × f8)**, so the reader will *not* raise — it will
+   silently mislabel a different quantity. Rename the key, and consider gating on
+   `code_version` so pre-change files keep the old label.
+3. `codt_tools/simulation.py:1632` — the parcel `LEM Turbulence:` summary list;
+   drop `kolmogorov_length_scale`, optionally add the derived attributes below.
+4. `tests/test_simulation.py:522` — asserts `hdr["kolmogorov_length_scale"] ==
+   0.001`; update to the new key and expected value.
+5. `CLAUDE.md` "Eddy Binary" spec above — updated in place; the reader is not.
+
+**New optional global attributes** on parcel output — additive, so
+`CODT_output_v1` is unchanged. Detect by presence, do not require:
+`LEM.actual_kolmogorov_scale`, `LEM.grid_eddy_scale`,
+`LEM.diffusivity_length_scale`, `LEM.smallest_eddy_scale`,
+`LEM.smallest_eddy_gridpoints` (int), `LEM.diffusivity_enhancement`. The old
+`TURBULENCE_LEM.kolmogorov_length_scale` attribute is absent from new files.
+Consistency check: `smallest_eddy_scale == smallest_eddy_gridpoints * H/N`.
+
+**Version impact.** No conventions string changes — `CODT_output_v1` and all
+input strings are untouched, so `SUPPORTED_CONVENTIONS` /
+`SUPPORTED_INPUT_CONVENTIONS` need no edit. But this is a breaking namelist
+change, hence a CODT **MAJOR** bump, with a matching codt_tools bump once the
+sites above are fixed. There is no back-compatible reader path: the
+incompatibility lives in CODT's namelist parser, not here.
+
+**Migration for existing configs:** delete the `kolmogorov_length_scale` line.
+To influence the model's smallest eddy, change `N`/`H` (which sets `6*dz`);
+`actual_kolmogorov_scale` depends only on `dissipation_rate`.
 
 ## CODT v3 interface
 
