@@ -150,7 +150,8 @@ class Registry:
             Experiment to update.
         **fields
             Column/value pairs; allowed columns are title, hypothesis,
-            status, conclusion, analysis_artifacts, data_root.
+            status, conclusion, analysis_artifacts, data_root,
+            permanent_data_root.
         """
         allowed = {
             "title",
@@ -159,6 +160,7 @@ class Registry:
             "conclusion",
             "analysis_artifacts",
             "data_root",
+            "permanent_data_root",
         }
         bad = set(fields) - allowed
         if bad:
