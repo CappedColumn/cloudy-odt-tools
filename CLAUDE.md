@@ -129,6 +129,21 @@ dt_eddy = np.dtype([('M','<i4'),('L','<i4'),('time','<f8')])
 
 Unformatted Fortran stream. Header: N(i4), H(f8), domain_width(f8), volume_scaling(f8). Per-event: id_keep(i4), id_kill(i4), r_keep(f8), r_kill(f8), r_after(f8), position(f8), time(f8), coalesced(i1). `load_collisions` reads the trailing `coalesced` (i1) flag (1 = merged, 0 = bounce; 49-byte packed record).
 
+> **`time` changed meaning in CODT 3.0.1 (`c67809c`) — layout unchanged.** Through
+> 3.0.0 this field held the event's time *within* the current collision-coalescence
+> window (0 → `delta_time`), not absolute time: values were tiny (order 1e-8–1e-2 s),
+> reset every window, so the stream was **non-monotonic**. From 3.0.1 it is absolute
+> simulation time, on the same axis as the output NC `time` coordinate. The field was
+> always `f8`, so the 49-byte record is **identical** and readers parse both eras
+> without error — only the values differ. Detect by the run's `code_version` /
+> `git_commit`, or by testing whether any `time` exceeds one `delta_time`.
+>
+> For pre-3.0.1 files, absolute time is recoverable by partitioning events into write
+> intervals using the cumulative `N_collisions` from the output NC (the binary is
+> written in event order): the k-th block of `N_collisions[k]` events belongs to
+> interval k. Binary totals match `N_collisions`/`N_coalescences` exactly in both
+> eras, so that is a safe cross-check.
+
 ```python
 dt_header = np.dtype([('N','<i4'),('H','<f8'),('domain_width','<f8'),('volume_scaling','<f8')])
 dt_record = np.dtype([('id_keep','<i4'),('id_kill','<i4'),('r_keep','<f8'),('r_kill','<f8'),('r_after','<f8'),('position','<f8'),('time','<f8'),('coalesced','<i1')])
