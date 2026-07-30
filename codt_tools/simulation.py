@@ -1194,6 +1194,19 @@ class CODTSimulation:
             merged radius) and 0 for a collision without coalescence
             (``r_after = 0``).
 
+        Notes
+        -----
+        ``time`` is absolute simulation time — on the same axis as the output
+        NetCDF ``time`` coordinate — only for CODT >= 3.0.1. Through CODT 3.0.0
+        the field held time *within* the current collision-coalescence window
+        (0 to ``delta_time``), so values were tiny, reset every window, and the
+        stream was non-monotonic. The record layout never changed, so both eras
+        parse without error and only the values differ; check the run's
+        ``code_version``, or test whether any ``time`` exceeds one
+        ``delta_time``. For a pre-3.0.1 file, absolute times are recoverable by
+        partitioning the events (which are in event order) into write intervals
+        using the cumulative ``N_collisions`` from the output NetCDF.
+
         Raises
         ------
         FileNotFoundError

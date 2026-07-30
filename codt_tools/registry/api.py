@@ -150,7 +150,8 @@ class Registry:
             Experiment to update.
         **fields
             Column/value pairs; allowed columns are title, hypothesis,
-            status, conclusion, analysis_artifacts, data_root.
+            status, conclusion, analysis_artifacts, data_root,
+            permanent_data_root.
         """
         allowed = {
             "title",
@@ -159,6 +160,7 @@ class Registry:
             "conclusion",
             "analysis_artifacts",
             "data_root",
+            "permanent_data_root",
         }
         bad = set(fields) - allowed
         if bad:
@@ -482,6 +484,35 @@ class Registry:
             cur = self._conn.execute(
                 "UPDATE runs SET data_status = ? WHERE run_id = ?",
                 (data_status, run_id),
+            )
+        if cur.rowcount == 0:
+            raise KeyError(f"Unknown run: {run_id}")
+
+    def update_run(self, run_id: str, **fields: Any) -> None:
+        """Update annotation columns of a run record.
+
+        Only `notes` is writable: provenance, status and data-location columns
+        have their own dedicated, transactional entry points and must not be
+        rewritten piecemeal.
+
+        Parameters
+        ----------
+        run_id : str
+            Run to update.
+        **fields
+            Column/value pairs; the only allowed column is notes.
+        """
+        allowed = {"notes"}
+        bad = set(fields) - allowed
+        if bad:
+            raise ValueError(f"Cannot update run column(s): {sorted(bad)}")
+        if not fields:
+            return
+        assignments = ", ".join(f"{col} = ?" for col in fields)
+        with self._conn:
+            cur = self._conn.execute(
+                f"UPDATE runs SET {assignments} WHERE run_id = ?",
+                (*fields.values(), run_id),
             )
         if cur.rowcount == 0:
             raise KeyError(f"Unknown run: {run_id}")
