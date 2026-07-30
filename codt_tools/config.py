@@ -26,6 +26,8 @@ from codt_tools.aerosol_io import (
 from codt_tools.parcel_io import (
     PRESSURE_MODES,
     VERTICAL_AXES,
+    _MAX_N_BLOB,
+    _validate_entrainment,
     read_parcel,
     validate_legs,
     write_parcel,
@@ -1037,9 +1039,20 @@ class ParcelInput:
         ent_rate : array-like
             Fractional entrainment rate per leg, in **1/km** (not 1/m).
         n_blob : array-like
-            Blobs per entrainment event per leg (1–10).
+            Number of evenly sized chunks the replaced volume is split into,
+            per leg (1–10). Purely a mixing axis — it does not change how much
+            is entrained, nor the event spacing.
         psigma : array-like
-            Blob fraction per leg, in (0, 1), with ``psigma * n_blob < 1``.
+            Total domain fraction replaced per entrainment event, per leg, in
+            (0, 1). Each chunk needs at least one gridcell, so
+            ``int(psigma * N) >= n_blob``.
+
+        Notes
+        -----
+        This is the CODT >= 3.1.0 meaning of ``psigma``. Through CODT 3.0.1 it
+        was the size of *one* blob, so an event replaced ``n_blob * psigma`` of
+        the domain; schedules carried over from that era entrain ``n_blob``
+        times less now.
         """
         self.ent_rate = np.asarray(ent_rate, dtype=np.float64)
         self.n_blob = np.asarray(n_blob, dtype=np.int32)
@@ -1064,6 +1077,7 @@ class ParcelInput:
         path: Union[str, Path],
         initial_level: float | None = None,
         vertical_axis: str = "height",
+        n_grid: int | None = None,
     ) -> None:
         """Write the parcel input to a NetCDF file.
 
@@ -1076,8 +1090,14 @@ class ParcelInput:
             validation is left to CODT at run time.
         vertical_axis : {"height", "pressure"}
             Axis that ``segment_coord`` is expressed on.
+        n_grid : int, optional
+            Grid size ``N``, used to check the entrainment schedule's
+            ``int(psigma * N) >= n_blob`` rule. If None that check is left to
+            CODT at run time.
         """
-        write_parcel(path, self.to_dict(), initial_level, vertical_axis)
+        write_parcel(
+            path, self.to_dict(), initial_level, vertical_axis, n_grid
+        )
 
     # ------------------------------------------------------------------
     # Display
@@ -1431,7 +1451,10 @@ class CODTConfig:
 
         if self.params.get("simulation_mode") == "parcel":
             self.params.set(parcel_file="parcel_input.nc")
-            self.parcel.write(directory / "parcel_input.nc")
+            self.parcel.write(
+                directory / "parcel_input.nc",
+                n_grid=self.params.get("n"),
+            )
 
         self.params.write(directory / "params.nml")
 
@@ -1557,6 +1580,42 @@ class CODTConfig:
                     "requires an environmental sounding in the parcel input. "
                     "Use cfg.parcel.set_env_profile(...)."
                 )
+
+            # Mirror CODT's entrainment startup abort (>= 3.1.0): psigma is the
+            # total domain fraction replaced per event, split into n_blob evenly
+            # sized chunks, so each chunk needs at least one gridcell. The
+            # per-leg schedule overrides the namelist scalars where present.
+            if self.params.get("do_entrainment"):
+                n = self.params.get("n")
+                psigma = self.params.get("psigma")
+                n_blob = self.params.get("n_blob")
+                if not 0.0 < psigma < 1.0:
+                    raise ValueError(
+                        f"psigma must be in (0, 1), got {psigma}."
+                    )
+                if not 1 <= n_blob <= _MAX_N_BLOB:
+                    raise ValueError(
+                        f"n_blob must be in 1..{_MAX_N_BLOB}, got {n_blob}."
+                    )
+                if int(psigma * n) < n_blob:
+                    raise ValueError(
+                        f"int(psigma * N) = {int(psigma * n)} is fewer than "
+                        f"n_blob = {n_blob} chunks (psigma={psigma}, N={n}); "
+                        f"every chunk needs at least one gridcell."
+                    )
+                leg_ent_rate = self.parcel.ent_rate
+                leg_n_blob = self.parcel.n_blob
+                leg_psigma = self.parcel.psigma
+                if (leg_ent_rate is not None
+                        and leg_n_blob is not None
+                        and leg_psigma is not None):
+                    _validate_entrainment(
+                        leg_ent_rate,
+                        leg_n_blob,
+                        leg_psigma,
+                        self.parcel.n_legs,
+                        n,
+                    )
 
             if self.parcel.n_legs < 1:
                 raise ValueError("Parcel input must have at least one leg.")

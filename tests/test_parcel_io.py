@@ -205,16 +205,46 @@ class TestParcelIO:
                 initial_level=0.0,
             )
 
-    def test_psigma_times_n_blob_must_be_under_one(self, tmp_path: Path) -> None:
-        with pytest.raises(ValueError, match=r"psigma \* n_blob"):
+    def test_every_chunk_needs_a_gridcell(self, tmp_path: Path) -> None:
+        # int(0.01 * 100) = 1 cell cannot be split into 5 chunks.
+        with pytest.raises(ValueError, match=r"int\(psigma \* N\)"):
             write_parcel(
                 tmp_path / "p.nc",
                 {
                     "segment_coord": [1000.0], "velocity": [1.0],
-                    "ent_rate": [1.0], "n_blob": [5], "psigma": [0.3],
+                    "ent_rate": [1.0], "n_blob": [5], "psigma": [0.01],
                 },
                 initial_level=0.0,
+                n_grid=100,
             )
+
+    def test_psigma_times_n_blob_over_one_is_allowed(
+        self, tmp_path: Path
+    ) -> None:
+        # Rejected before CODT 3.1.0, accepted now: psigma is the *total*
+        # fraction replaced, so n_blob no longer multiplies it.
+        write_parcel(
+            tmp_path / "p.nc",
+            {
+                "segment_coord": [1000.0], "velocity": [1.0],
+                "ent_rate": [1.0], "n_blob": [3], "psigma": [0.5],
+            },
+            initial_level=0.0,
+            n_grid=100,
+        )
+        assert (tmp_path / "p.nc").exists()
+
+    def test_chunk_check_skipped_without_n_grid(self, tmp_path: Path) -> None:
+        # Without N the rule cannot be evaluated; CODT checks it at run time.
+        write_parcel(
+            tmp_path / "p.nc",
+            {
+                "segment_coord": [1000.0], "velocity": [1.0],
+                "ent_rate": [1.0], "n_blob": [5], "psigma": [0.01],
+            },
+            initial_level=0.0,
+        )
+        assert (tmp_path / "p.nc").exists()
 
     def test_n_blob_out_of_range(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="n_blob must be in"):

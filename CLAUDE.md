@@ -151,6 +151,9 @@ dt_record = np.dtype([('id_keep','<i4'),('id_kill','<i4'),('r_keep','<f8'),('r_k
 
 ## Merged
 
+- **CODT 3.1.0 psigma/n_blob redefinition** (codt_tools v0.7.0): `psigma` is now
+  the total domain fraction replaced per entrainment event; validation is
+  `int(psigma*N) >= n_blob`. See "CODT 3.1.0 psigma/n_blob redefinition" below.
 - **CODT 3.0.0 LEM turbulence scales** (codt_tools v0.6.0): `kolmogorov_length_scale` removed from `&TURBULENCE_LEM`; smallest eddy derived from grid + diffusivities. See "CODT 3.0.0 LEM turbulence scales" below.
 - **CODT v3 interface** (codt_tools v0.5.0, for CODT 2.0.0): waypoint-leg parcel input, aerosol seeding, registry input-schema gating. See "CODT v3 interface" below.
 - **v0.6.0**: Aerosol detrainment/entrainment during blob events, standalone `entrainment.f90` module, `&ENTRAINMENT` namelist, entrainment budget variables in output NC.
@@ -164,6 +167,53 @@ dt_record = np.dtype([('id_keep','<i4'),('id_kill','<i4'),('r_keep','<f8'),('r_k
 - Snakemake example Snakefile
 - `test_runs/workshop_verify/setup_cases.py` still calls the pre-v3 parcel API
   (`set_parcel(time=...)`); unrelated to the LEM change, but it will not run.
+
+## CODT 3.1.0 psigma/n_blob redefinition
+
+> **Status: implemented in codt_tools v0.7.0.** CODT side is `c529ae9`, tag
+> `v3.1.0`. No file format changed; no conventions string moved.
+
+**What changed in CODT.** Through 3.0.1, `psigma` was the size of **one** blob,
+so an entrainment event replaced `n_blob * psigma` of the domain and the event
+interval carried an `n_blob` factor to compensate. From 3.1.0, `psigma` is the
+**total** fraction replaced per event and `n_blob` only subdivides that fixed
+volume into evenly sized chunks (`int(psigma*N)` split `n_blob` ways, integer
+remainder spread one cell at a time so the total does not drift with `n_blob`).
+
+Consequences for anything reading or writing these parameters:
+
+- **Event timing depends on `psigma` alone.** `dt = (psigma/(1−psigma))/(ent_rate·|vel|)`.
+- **`n_blob` is now a pure mixing axis.** Sweeping it holds the entrainment rate
+  and per-event volume fixed and varies only the spatial distribution
+  (inhomogeneous → homogeneous). Previously such a sweep changed the entrained
+  volume instead.
+- **Validation changed:** `psigma * n_blob < 1` → `int(psigma*N) >= n_blob`.
+  `psigma` alone must still be in (0, 1); `n_blob` is still capped at 10.
+- **This departs from EMPM**, which keeps the per-blob reading. Deliberate.
+
+**What codt_tools does about it (v0.7.0).** The new rule needs `N`, which the
+parcel writer never received, so `write_parcel` and `ParcelInput.write` take an
+optional `n_grid` (the `&PARAMETERS N` the run will use). Pass it and
+`int(psigma*N) >= n_blob` is checked per leg; omit it and that check is left to
+CODT at run time — existing callers keep working. `CODTConfig.write` supplies it
+automatically. `CODTConfig.validate()` mirrors CODT's startup abort for the
+`&ENTRAINMENT` scalars *and* the per-leg schedule when `do_entrainment` is on.
+Note the parcel branch runs `_validate_lem_scales()` first, so a too-coarse `N`
+raises there before the entrainment check is reached.
+
+**Output impact.** Same variable and attribute names (`psigma`, `n_blob`,
+`PARCEL.psigma`, `PARCEL.n_blob`) carrying the **new** meaning — so old and new
+runs are indistinguishable by name. The `long_name` text was reworded
+(`psigma`: "Blob Fraction of Domain" → "Total Domain Fraction Replaced per
+Entrainment Event"), which is the only in-file hint; otherwise distinguish by
+`code_version`. Attribute text only — `CODT_output_v1` is unchanged.
+
+**Comparability of existing runs.** `n_blob = 1` runs are bit-identical across
+the change. `n_blob > 1` runs are **not comparable**: an old
+`n_blob = 5, psigma = 0.1` event replaced 50% of the domain, a new one replaces
+10%. Affected ensembles (including `EXP001_sf01_seeding`) need re-running before
+their realization spread can be read as stochastic. Old behaviour is reproducible
+exactly by setting `psigma` to the old `n_blob * psigma` with `n_blob = 1`.
 
 ## CODT 3.0.0 LEM turbulence scales
 
@@ -310,7 +360,7 @@ a CODT 2.0.0 binary.
 
 ## Workshop materials (`examples/`)
 
-Four step-by-step tutorials (chamber simple/advanced, parcel simple/advanced) for interactive-Python + manual `CODT ./params.nml` workflows, plus `templates/{chamber,parcel}_template.py` end-to-end scripts and a pandoc site build (`site/build_site.sh` → `site/html/`, gitignored; publish by copying to `~/public_html/codt_workshop/`). Workshop conda env: `cloudy-odt`. Physics-verified settings: chamber `tmax=600` (~45 s wall), parcel `tmax=240` (~4.5 min wall); parcel cases need small CCN (`edge_radii=[30,60,120]` nm — the 291–1000 nm chamber aerosol never passes its Köhler critical radius, so `Nact` stays 0) and `initial_rh=0.98`; entrainment needs `ent_rate≈0.002` m⁻¹ with a humid sounding (`RH=[0.95,0.92,0.88]`) — `ent_rate=2.0` (the code default) or a dry sounding evaporates the entire cloud. Entrainment event spacing: `dt = (n_blob/ent_rate)·(psigma/(1−psigma))/|vel|`.
+Four step-by-step tutorials (chamber simple/advanced, parcel simple/advanced) for interactive-Python + manual `CODT ./params.nml` workflows, plus `templates/{chamber,parcel}_template.py` end-to-end scripts and a pandoc site build (`site/build_site.sh` → `site/html/`, gitignored; publish by copying to `~/public_html/codt_workshop/`). Workshop conda env: `cloudy-odt`. Physics-verified settings: chamber `tmax=600` (~45 s wall), parcel `tmax=240` (~4.5 min wall); parcel cases need small CCN (`edge_radii=[30,60,120]` nm — the 291–1000 nm chamber aerosol never passes its Köhler critical radius, so `Nact` stays 0) and `initial_rh=0.98`; entrainment needs `ent_rate≈0.002` m⁻¹ with a humid sounding (`RH=[0.95,0.92,0.88]`) — `ent_rate=2.0` (the code default) or a dry sounding evaporates the entire cloud. Entrainment event spacing: `dt = (psigma/(1−psigma))/(ent_rate·|vel|)` — **independent of `n_blob`** from CODT 3.1.0 (it carried an `n_blob` factor through 3.0.1; see "CODT 3.1.0 psigma/n_blob redefinition" below).
 
 ## Post-v0.3.0 fixes
 

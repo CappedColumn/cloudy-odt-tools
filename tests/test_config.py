@@ -431,6 +431,49 @@ class TestCODTConfigValidate:
         )
         cfg.validate()
 
+    def _entraining_parcel(self) -> CODTConfig:
+        cfg = CODTConfig()
+        cfg.set(simulation_mode="parcel", parcel_file="p.nc",
+                do_entrainment=True)
+        cfg.parcel.set_env_profile(
+            height=[0.0, 2000.0],
+            pressure=[100000.0, 80000.0],
+            temperature=[300.0, 285.0],
+            RH=[0.8, 0.5],
+        )
+        return cfg
+
+    def test_parcel_entrainment_chunk_needs_a_gridcell(self) -> None:
+        # int(0.001 * 1024) = 1 cell cannot be split into 2 chunks.
+        cfg = self._entraining_parcel()
+        cfg.set(n=1024, psigma=0.001, n_blob=2)
+        with pytest.raises(ValueError, match=r"int\(psigma \* N\)"):
+            cfg.validate()
+
+    def test_parcel_entrainment_psigma_times_n_blob_over_one_passes(
+        self,
+    ) -> None:
+        # Rejected before CODT 3.1.0: psigma is now the total fraction
+        # replaced, so n_blob no longer multiplies it.
+        cfg = self._entraining_parcel()
+        cfg.set(psigma=0.5, n_blob=3)
+        cfg.validate()
+
+    def test_parcel_entrainment_bad_psigma_fails(self) -> None:
+        cfg = self._entraining_parcel()
+        cfg.set(psigma=1.0)
+        with pytest.raises(ValueError, match="psigma must be in"):
+            cfg.validate()
+
+    def test_parcel_entrainment_leg_schedule_checked(self) -> None:
+        cfg = self._entraining_parcel()
+        cfg.set(n=1024)
+        cfg.parcel.set_entrainment_schedule(
+            ent_rate=[1.0], n_blob=[5], psigma=[0.001]
+        )
+        with pytest.raises(ValueError, match=r"int\(psigma \* N\)"):
+            cfg.validate()
+
     def test_parcel_environment_mode_needs_env(self) -> None:
         cfg = CODTConfig()
         cfg.set(simulation_mode="parcel", parcel_file="p.nc",

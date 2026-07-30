@@ -127,6 +127,7 @@ def _validate_entrainment(
     n_blob: np.ndarray,
     psigma: np.ndarray,
     n_legs: int,
+    n_grid: int | None = None,
 ) -> None:
     """Validate a per-leg entrainment schedule.
 
@@ -135,11 +136,17 @@ def _validate_entrainment(
     ent_rate : np.ndarray
         Fractional entrainment rate per leg, in 1/km (**not** 1/m).
     n_blob : np.ndarray
-        Blobs per entrainment event per leg.
+        Number of chunks the replaced volume is split into, per leg.
     psigma : np.ndarray
-        Blob fraction per leg.
+        Total domain fraction replaced per entrainment event, per leg
+        (CODT >= 3.1.0 meaning; through 3.0.1 this was the size of *one*
+        blob).
     n_legs : int
         Expected length of each array.
+    n_grid : int, optional
+        Grid size ``N`` the run will use. Required to check CODT's
+        ``int(psigma * N) >= n_blob`` rule (every chunk needs at least one
+        gridcell); when None that check is left to CODT at run time.
 
     Raises
     ------
@@ -162,8 +169,16 @@ def _validate_entrainment(
         raise ValueError(f"n_blob must be in 1..{_MAX_N_BLOB}")
     if np.any(psigma <= 0.0) or np.any(psigma >= 1.0):
         raise ValueError("psigma must be in (0, 1)")
-    if np.any(psigma * n_blob >= 1.0):
-        raise ValueError("psigma * n_blob must be < 1 for every leg")
+    if n_grid is not None:
+        cells = (psigma * n_grid).astype(np.int64)
+        bad = np.nonzero(cells < n_blob)[0]
+        if bad.size:
+            i = int(bad[0])
+            raise ValueError(
+                f"leg {i}: int(psigma * N) = {int(cells[i])} is fewer than "
+                f"n_blob = {int(n_blob[i])} chunks (psigma={float(psigma[i])}, "
+                f"N={n_grid}); every chunk needs at least one gridcell"
+            )
 
 
 def read_parcel(path: Union[str, Path]) -> dict[str, Any]:
@@ -243,6 +258,7 @@ def write_parcel(
     data: dict[str, Any],
     initial_level: float | None = None,
     vertical_axis: str = "height",
+    n_grid: int | None = None,
 ) -> None:
     """Write a parcel_input.nc file in the v3 waypoint-leg schema.
 
@@ -263,6 +279,10 @@ def write_parcel(
     vertical_axis : {"height", "pressure"}
         Axis that ``segment_coord`` is expressed on, matching
         ``&PARCEL vertical_axis``.
+    n_grid : int, optional
+        Grid size ``N`` the run will use, needed to check the entrainment
+        schedule's ``int(psigma * N) >= n_blob`` rule. If None that check is
+        left to CODT at run time.
 
     Raises
     ------
@@ -299,7 +319,7 @@ def write_parcel(
         ent_rate = np.atleast_1d(np.asarray(data["ent_rate"], dtype=np.float64))
         n_blob = np.atleast_1d(np.asarray(data["n_blob"], dtype=np.int32))
         psigma = np.atleast_1d(np.asarray(data["psigma"], dtype=np.float64))
-        _validate_entrainment(ent_rate, n_blob, psigma, n_legs)
+        _validate_entrainment(ent_rate, n_blob, psigma, n_legs, n_grid)
 
     env: dict[str, np.ndarray] | None = None
     if data.get("env_pressure") is not None:
