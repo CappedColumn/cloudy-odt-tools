@@ -105,7 +105,8 @@ of `path -> values` (expanded to independent axes). It **raises when two crossed
 axes set the same path**; `+` is how two designs are unioned. A callable value
 transforms the current value instead of replacing it. Everything else —
 filtering, control groups, derived values — is plain Python on a list of dicts.
-No sweep DSL, deliberately.
+No sweep DSL, deliberately. Recipes for conditional axes, ragged branches,
+replicates, filtering and post-hoc derivation: `docs/designs.md`.
 
 Run names default to `{base_name}_{index}` zero-padded (`_SWEEP_ABBREV` is
 gone — it stringified arrays into directory names and collided silently).

@@ -41,7 +41,7 @@ sim.plot_timeseries("LWC")
 sim.plot_timeheight("T")
 
 # Compare multiple runs
-cases = case.sweep({"params.tref": [20.0, 21.0, 22.0]})
+cases = case.sweep({"params.tref": [20.0, 21.0, 22.0]})   # see docs/designs.md
 sims = [CODTSimulation(f"/path/to/output/{c.name}") for c in cases]
 CODTSimulation.compare(sims, "LWC", plot_type="timeseries")
 ```
@@ -69,7 +69,9 @@ codt-registry list --experiment EXP001 --status failed
 codt-registry export --experiment EXP001 --csv runs.csv
 ```
 
-See [docs/registry-quickstart.md](docs/registry-quickstart.md) for the
+See [docs/designs.md](docs/designs.md) for describing an ensemble —
+including conditional, ragged and sampled designs —
+[docs/registry-quickstart.md](docs/registry-quickstart.md) for the
 full define → create → run → query → conclude workflow,
 [docs/registry-schema.md](docs/registry-schema.md) for the schema, and
 [docs/using-a-shared-registry.md](docs/using-a-shared-registry.md) for
