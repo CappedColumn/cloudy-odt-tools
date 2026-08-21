@@ -282,11 +282,18 @@ def create_experiment_runs(
         base_output_dir=exp_dir / "runs",
         account=slurm.get("account", ""),
         partition=slurm.get("partition", ""),
-        cores_per_node=slurm.get("cores_per_node", 40),
+        # None -> resolved from the node type the job will land on.
+        cores_per_node=slurm.get("cores_per_node"),
         registry=registry,
         experiment_id=spec.experiment_id,
+        qos=slurm.get("qos"),
+        # None -> resolved from the executable's build architecture.
+        constraint=slurm.get("constraint"),
+        mem_per_task=slurm.get("mem_per_task"),
+        cluster=slurm.get("cluster"),
     )
     runner.default_walltime = slurm.get("walltime")
+    runner.default_array_throttle = slurm.get("array_throttle")
 
     # Build gate: refuse to create runs from a binary whose provenance
     # can't be recorded. Fails BEFORE anything is registered or written.
@@ -338,5 +345,6 @@ def create_experiment_runs(
             execution_context=spec.execution_context,
             executable_path=runner.executable,
             code_version=runner.codt_version,
+            build_arch=runner.build_arch,
         )
     return runner, run_dirs

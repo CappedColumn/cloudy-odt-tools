@@ -15,6 +15,26 @@ from codt_tools.experiment import (
 from codt_tools.registry import Registry, sha256_file
 
 
+@pytest.fixture(autouse=True)
+def no_scheduler(monkeypatch):
+    """Keep these tests off the live scheduler.
+
+    ``CODTRunner`` introspects sinfo/mychpc at construction and preflights
+    the submission target; both are stubbed so the tests are hermetic.
+    That logic is covered directly in ``test_slurm.py`` and
+    ``test_runner.py``.
+    """
+    from codt_tools import slurm as slurm_mod
+
+    monkeypatch.setattr(slurm_mod, "detect_build_arch", lambda exe: None)
+    monkeypatch.setattr(slurm_mod, "partition_cluster", lambda p: None)
+    monkeypatch.setattr(
+        slurm_mod, "cores_for_constraint",
+        lambda p, c=None, f=None, nodes=None: None,
+    )
+    monkeypatch.setattr(slurm_mod, "validate_target", lambda *a, **k: [])
+
+
 @pytest.fixture
 def spec(tmp_path: Path) -> ExperimentSpec:
     """A small chamber sweep spec rooted in a tmp dir."""
@@ -375,21 +395,26 @@ class TestCreateExperimentRuns:
         monkeypatch.setattr(sp, "run", fake_sbatch)
         runner.submit(run_dirs)   # no walltime argument
 
-        script = (runner.base_output_dir / "CODT_batch_0.sh").read_text()
+        scripts = sorted((runner.base_output_dir / "slurm").glob("*.sh"))
+        assert len(scripts) == 1   # one array job, not one per batch
+        script = scripts[0].read_text()
         assert "#SBATCH --time=01:00:00" in script   # from spec.slurm_options
         assert registry.get_experiment("EXP001")["status"] == "running"
         for run in registry.query_runs(experiment_id="EXP001"):
             assert run["status"] == "queued"
+            # Runs are keyed to their array task, not the bare job id.
+            assert run["slurm_job_id"] == "999_0"
 
     def test_sbatch_records_completion_and_failure_detail(
         self, spec: ExperimentSpec, registry: Registry, codt_exe: Path
     ) -> None:
         runner, run_dirs = create_experiment_runs(spec, registry, codt_exe)
-        script = runner._generate_sbatch(run_dirs, "01:00:00")
+        script = runner._generate_array_sbatch(
+            [run_dirs], "01:00:00", "j", Path("/m")
+        )
 
         # Output metadata captured in-job after success.
-        assert "complete" in script
-        assert str(run_dirs[0] / "output") in script
+        assert '$REGISTRY complete "$RUN_NAME" "$RUN_DIR/output"' in script
         # Failure detail points at the logs.
         assert "--detail" in script and ".log" in script
         # SLURM job stdout lands somewhere known.
@@ -404,11 +429,15 @@ class TestCreateExperimentRuns:
         )
         scripts = runner.submit(run_dirs, walltime="01:00:00", dry_run=True)
 
-        # 4 runs / 4 cores_per_node = 1 batch script.
+        # One array script for the whole ensemble.
         assert len(scripts) == 1
-        content = Path(scripts[0]).read_text()
+        script_path = Path(scripts[0])
+        content = script_path.read_text()
         assert "#SBATCH --partition=notchpeak-guest" in content
         assert "codt-registry --db" in content
-        for rd in run_dirs:
-            assert str(rd / "inputs" / "params.nml") in content
-        assert content.count("taskset") == 4
+        assert "#SBATCH --array=0-0" in content
+
+        # Run directories live in the manifest, one line per array task.
+        lines = script_path.with_suffix(".manifest").read_text().splitlines()
+        assert len(lines) == 1
+        assert sorted(lines[0].split()) == sorted(str(d) for d in run_dirs)

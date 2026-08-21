@@ -44,9 +44,10 @@ One row per simulation. Indexes on `experiment_id` and `status`.
 | `run_dir` | **relative to `experiments.data_root`** (absolute for standalone runs) |
 | `status` | `registered`/`queued`/`running`/`completed`/`failed`/`collected` (CHECK) |
 | `created_at`, `started_at`, `completed_at` | lifecycle timestamps |
-| `exit_code`, `slurm_job_id` | from execution |
+| `exit_code`, `slurm_job_id` | from execution; array tasks record `{array_job_id}_{task_index}` |
 | `conventions`, `code_version`, `git_commit` | read from output NC attrs at completion |
 | `git_branch`, `build_info` | optional build provenance |
+| `build_arch` | target CPU microarchitecture of the binary (e.g. `zen2`), detected from its netCDF RPATH; NULL for rows registered before schema v4, and for binaries not linked against CHPC spack |
 | `codt_tools_version` | recorded at registration |
 | `executable_path`, `executable_checksum` | SHA256 of the binary |
 | `executable_archive_path` | content-addressed archive copy |
@@ -151,6 +152,23 @@ WHERE e.status = 'concluded' AND r.data_status = 'on_scratch';
 SELECT status, timestamp, hostname, detail FROM status_events
 WHERE run_id = ? ORDER BY id;
 ```
+
+### `build_arch` (v4)
+
+CODT ships architecture-tuned builds that are not portable across CPU
+types, so which architecture a run's binary targeted is part of its
+provenance — it determines both where the job could run and, for a tuned
+build, the exact floating-point code path taken.
+
+The value comes from `codt_tools.slurm.detect_build_arch()`, which reads the
+spack architecture token out of the binary's embedded netCDF RPATH rather
+than from any CODT-side stamp. See `docs/running-on-slurm.md` for the
+mechanism and its one caveat.
+
+It is recorded at registration (not completion), because it is a property of
+the binary rather than of the output. Rows migrated up from v3 read NULL:
+the architecture of a past run's binary is not recoverable after the fact,
+and NULL correctly reads as "not recorded" rather than "portable".
 
 ## Migration policy
 

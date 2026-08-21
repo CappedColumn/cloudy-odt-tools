@@ -16,7 +16,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION: int = 3
+SCHEMA_VERSION: int = 4
 
 # Milliseconds to wait on a locked database before failing. Bursts of tiny
 # status writes arrive when up to 40 packed SLURM tasks finish on one node.
@@ -85,6 +85,7 @@ CREATE TABLE runs (
     git_commit TEXT,
     git_branch TEXT,
     codt_tools_version TEXT,
+    build_arch TEXT,                  -- target CPU microarch of the binary (v4)
     executable_path TEXT,
     executable_checksum TEXT,
     executable_archive_path TEXT,
@@ -155,6 +156,11 @@ MIGRATIONS: dict[int, str] = {
         "ALTER TABLE input_files ADD COLUMN schema_conventions TEXT;"
         "ALTER TABLE input_files ADD COLUMN has_seed_group INTEGER;"
     ),
+    # v4: record the target microarchitecture of the binary each run used,
+    # alongside the existing code_version/git_commit provenance. Existing
+    # rows stay NULL — the architecture of a past run's binary is not
+    # recoverable from the database.
+    3: "ALTER TABLE runs ADD COLUMN build_arch TEXT;",
 }
 
 

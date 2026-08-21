@@ -236,6 +236,7 @@ class Registry:
         code_version: str | None = None,
         git_commit: str | None = None,
         git_branch: str | None = None,
+        build_arch: str | None = None,
         build_info: str | None = None,
         data_status: str | None = "on_scratch",
         notes: str | None = None,
@@ -264,6 +265,11 @@ class Registry:
         run_dir : str or Path
             The run directory containing ``inputs/`` (absolute here; stored
             relative to the experiment's data_root when one is set).
+        build_arch : str, optional
+            Target CPU microarchitecture of the binary (e.g. ``"zen2"``), as
+            detected by :func:`codt_tools.slurm.detect_build_arch`. Recorded
+            alongside ``code_version``/``git_commit`` so a run's results can
+            be tied to the hardware the binary was tuned for.
 
         Returns
         -------
@@ -293,10 +299,11 @@ class Registry:
             self._conn.execute(
                 "INSERT INTO runs (run_id, experiment_id, descriptor, "
                 "execution_context, run_dir, status, created_at, code_version, "
-                "git_commit, git_branch, codt_tools_version, executable_path, "
-                "executable_checksum, executable_archive_path, build_info, "
-                "data_status, notes) "
-                "VALUES (?, ?, ?, ?, ?, 'registered', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "git_commit, git_branch, build_arch, codt_tools_version, "
+                "executable_path, executable_checksum, "
+                "executable_archive_path, build_info, data_status, notes) "
+                "VALUES (?, ?, ?, ?, ?, 'registered', ?, ?, ?, ?, ?, ?, ?, ?, "
+                "?, ?, ?, ?)",
                 (
                     run_id,
                     experiment_id,
@@ -307,6 +314,7 @@ class Registry:
                     code_version,
                     git_commit,
                     git_branch,
+                    build_arch,
                     _codt_tools_version(),
                     exe_path,
                     exe_checksum,

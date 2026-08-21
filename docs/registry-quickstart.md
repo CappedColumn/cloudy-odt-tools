@@ -56,11 +56,19 @@ parameter_sweep:
   volume_scaling: [13, 50]
 
 slurm_options:
-  account: owner-guest
-  partition: notchpeak-guest
-  cores_per_node: 40
+  account: krueger
+  partition: notchpeak-freecycle
+  qos: notchpeak-freecycle          # partition != qos on some clusters
   walltime: "12:00:00"
+  array_throttle: 8                 # cap concurrent array tasks
+  mem_per_task: 2G
+  # cores_per_node: omit -> resolved from the node type (rom -> 64)
+  # constraint:     omit -> resolved from the executable's build arch
 ```
+
+Node targeting is automatic: the runner detects the executable's build
+architecture, constrains the job to nodes that can run it, and packs to
+their real core count. See `docs/running-on-slurm.md`.
 
 ## 2. Create the runs
 
@@ -94,21 +102,28 @@ and creates:
 Run IDs are `{YYYYMMDD_HHMMSS}_{model}_{descriptor}`, e.g.
 `20260709_101500_codt_Tref18.0_VS13`. Each run is registered with all
 namelist parameters, input-file checksums, the executable's SHA256
-(archived content-addressed), and `codt --version` output.
+(archived content-addressed), `codt --version` output, and the binary's
+target CPU architecture (`build_arch`).
+
+`submit()` refuses a target whose nodes cannot run the executable — an
+architecture-tuned binary aimed at a partition without matching hardware
+raises rather than producing jobs that hang unschedulable or die with
+SIGILL. Pass `force=True` to override.
 
 ## 3. Run
 
 ```python
-# SLURM (batched cores_per_node runs per job; walltime defaults to
-# spec.slurm_options["walltime"]):
-job_ids = runner.submit(run_dirs)
+# SLURM: the whole ensemble goes as ONE job array, packed cores_per_node
+# runs per array task. Walltime defaults to spec.slurm_options["walltime"].
+job_ids = runner.submit(run_dirs)      # -> ['4812345'] (one array job id)
 
 # Or locally, one at a time (blocking):
 proc = runner.run_local(spec.expand()[0])
 ```
 
 On submission the experiment flips to `running`. Inside the job each
-run reports `running → completed/failed` (with its SLURM job ID), and
+run reports `running → completed/failed` (with its array task ID,
+`{array_job_id}_{task_index}`), and
 on success its output metadata (`conventions`, `code_version`,
 `git_commit`) is captured immediately — no separate `collect` step is
 required for bookkeeping. Every transition is appended to

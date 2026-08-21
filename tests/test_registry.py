@@ -112,8 +112,10 @@ class TestSchema:
         from codt_tools.registry.db import SCHEMA_SQL
 
         added_after = {
-            1: ("permanent_data_root", "schema_conventions", "has_seed_group"),
-            2: ("schema_conventions", "has_seed_group"),
+            1: ("permanent_data_root", "schema_conventions",
+                "has_seed_group", "build_arch"),
+            2: ("schema_conventions", "has_seed_group", "build_arch"),
+            3: ("build_arch",),
         }[version]
         old_sql = "\n".join(
             line
@@ -140,6 +142,26 @@ class TestSchema:
         assert {"schema_conventions", "has_seed_group"} <= self._columns(
             conn, "input_files"
         )
+        assert "build_arch" in self._columns(conn, "runs")
+        conn.close()
+
+    def test_v3_database_gains_build_arch(self, tmp_path):
+        """A v3 DB gains build_arch; existing runs read NULL."""
+        path = tmp_path / "r.db"
+        self._make_old_db(path, 3)
+        raw = sqlite3.connect(path)
+        raw.execute(
+            "INSERT INTO runs (run_id, run_dir, created_at) "
+            "VALUES ('r1', 'd', 't')"
+        )
+        raw.commit()
+        raw.close()
+
+        conn = connect(path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        row = conn.execute("SELECT build_arch FROM runs").fetchone()
+        # NULL: the architecture of a past run's binary is unrecoverable.
+        assert row["build_arch"] is None
         conn.close()
 
     def test_v2_database_migrates_to_v3(self, tmp_path):

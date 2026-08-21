@@ -83,6 +83,14 @@ Global attrs on NC files: `conventions`, `code_version` (git-describe string fro
 
 `CODTRunner` queries `codt --version` at init and stores the result in `self.codt_version` (None if binary is missing or doesn't support `--version`).
 
+### Architecture-aware SLURM submission (v0.8.0)
+
+`codt_tools/slurm.py` reads a binary's target CPU arch off its embedded netCDF RPATH (`detect_build_arch` → `"zen2"`), maps it to SLURM node features via `ARCH_CONSTRAINT` (**the one table to update when CODT adds a build profile**), and introspects `sinfo`/`mychpc batch`. `CODTRunner.__init__` stores `self.build_arch` and auto-resolves `constraint`, `cores_per_node` (minimum core count over matching nodes) and `cluster`; explicit constructor args always win, and everything degrades to no-constraint/40-cores off-cluster. `submit()` preflights the target and **raises** on an executable↔partition mismatch (`force=True` downgrades to a warning) — a zen2 binary on `notchpeak-shared-short` is unschedulable, and unconstrained on `notchpeak-freecycle` it SIGILLs on ~half the nodes.
+
+Submission is now **one job array per ensemble**, not one sbatch per batch: `_generate_array_sbatch` writes `{base_output_dir}/slurm/{experiment_id}_{stamp}.sh` plus a `.manifest` (one whitespace-separated line of run dirs per array index) that each task reads via `$SLURM_ARRAY_TASK_ID`. Runs are recorded with `slurm_job_id = "{array}_{task}"`. `cores_per_node` sets a task's *capacity*: the batch count is `ceil(n/cores_per_node)`, then runs are spread evenly across those batches (200 runs at 64 → `[50,50,50,50]`, not `[64,64,64,8]`), so `--ntasks` (sized to the largest batch) never over-reserves. `status()` falls back to `sacct` for job ids missing from `squeue` (a preempted/timed-out run is otherwise indistinguishable from a clean one). New optional constructor/`slurm_options` keys: `qos`, `constraint`, `mem_per_task`, `cluster`, `array_throttle`. **Preemption requeue/restart is out of scope** — CODT has no checkpoint/restart. Full docs: `docs/running-on-slurm.md`.
+
+Registry schema **v4** adds `build_arch` on `runs` (recorded at registration; NULL for pre-v4 rows). Group entitlement: notchpeak Rome is **freecycle-only**, `notchpeak-shared-short` has no Rome nodes, granite Genoa needs a zen4 build.
+
 `CODTConfig.validate()` mirrors the Fortran-side checks: range validation (N, tmax, H, pres, volume_scaling, Tref, simulation_mode) raises `ValueError`; cross-namelist inconsistencies (do_radiation without do_microphysics, write_eddies without do_turbulence, do_entrainment in chamber mode) issue `warnings.warn`.
 
 ### Namelist group placement (must match what CODT reads)
@@ -151,6 +159,10 @@ dt_record = np.dtype([('id_keep','<i4'),('id_kill','<i4'),('r_keep','<f8'),('r_k
 
 ## Merged
 
+- **Arch-aware array SLURM submission** (codt_tools v0.8.0): new
+  `codt_tools/slurm.py`, job-array submission, registry schema v4
+  (`build_arch`). No CODT-side change. See "Architecture-aware SLURM
+  submission" above and `docs/running-on-slurm.md`.
 - **CODT 3.1.0 psigma/n_blob redefinition** (codt_tools v0.7.0): `psigma` is now
   the total domain fraction replaced per entrainment event; validation is
   `int(psigma*N) >= n_blob`. See "CODT 3.1.0 psigma/n_blob redefinition" below.
