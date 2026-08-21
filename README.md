@@ -5,7 +5,7 @@ Cloudy One-Dimensional Turbulence (CODT) model.
 
 ## Features
 
-- **`Case`** — Build simulation input files (namelist, aerosol injection, parcel trajectory) with parameter sweeps
+- **`Case`** — Build simulation input files (namelist, aerosol injection, parcel trajectory), and expand a design into an ensemble of them
 - **`CODTRunner`** — Run simulations locally or submit SLURM batch jobs with core pinning
 - **`CODTSimulation`** — Load output, compute diagnostics, and produce publication-quality plots
 - **Multi-simulation comparison** — Overlay time series, profiles, and spectra across parameter sweeps
@@ -41,7 +41,7 @@ sim.plot_timeseries("LWC")
 sim.plot_timeheight("T")
 
 # Compare multiple runs
-cases = Case.sweep(case, tref=[20.0, 21.0, 22.0])
+cases = case.sweep({"params.tref": [20.0, 21.0, 22.0]})
 sims = [CODTSimulation(f"/path/to/output/{c.name}") for c in cases]
 CODTSimulation.compare(sims, "LWC", plot_type="timeseries")
 ```

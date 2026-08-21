@@ -18,6 +18,7 @@ from codt_tools.case.case import (
     PARCEL_FILENAME,
     Case,
 )
+from codt_tools.case.mutate import apply_point, cross
 from codt_tools.case.namelist import Namelist
 from codt_tools.case.parcel import (
     PRESSURE_MODES,
@@ -34,6 +35,8 @@ __all__ = [
     "Aerosol",
     "Case",
     "Namelist",
+    "apply_point",
+    "cross",
     "PARCEL_FILENAME",
     "PRESSURE_MODES",
     "Parcel",

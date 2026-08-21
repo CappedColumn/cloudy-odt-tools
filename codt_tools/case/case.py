@@ -25,11 +25,11 @@ from __future__ import annotations
 
 import copy
 import shutil
-from itertools import product
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Callable, Mapping, Union
 
 from codt_tools.case.aerosol import Aerosol
+from codt_tools.case.mutate import apply_point, as_design, cross, resolve_names
 from codt_tools.case.namelist import Namelist
 from codt_tools.case.parcel import Parcel
 from codt_tools.case.validate import initial_launch_level, validate_case
@@ -441,74 +441,76 @@ class Case:
         """Return a deep copy of this case."""
         return copy.deepcopy(self)
 
-    # Short-name abbreviations for sweep-generated simulation names.
-    _SWEEP_ABBREV: dict[str, str] = {
-        "tref": "Tref",
-        "tdiff": "Tdiff",
-        "tmax": "tmax",
-        "volume_scaling": "VS",
-        "n": "N",
-        "h": "H",
-        "pres": "P",
-        "lmin": "Lmin",
-        "lprob": "Lprob",
-        "max_accept_prob": "MAP",
-        "c2": "C2",
-        "zc2": "ZC2",
-        "expected_ndrops_per_gridpoint": "Ndrops",
-        "initial_wet_radius": "Rw",
-        "aerosol_concentration": "Naer",
-        "write_timer": "dt",
-        "integral_length_scale": "Lint",
-        "dissipation_rate": "eps",
-        "initial_rh": "RH",
-    }
+    def apply(self, point: Mapping[str, Any]) -> None:
+        """Apply a sweep point to this case, in place.
 
-    @staticmethod
-    def sweep(base: "Case", **param_ranges: list) -> list["Case"]:
-        """Generate a Cartesian product of namelist parameter variations.
-
-        Each returned case is an independent deep copy with a unique
-        ``simulation_name`` built from the base name and the varied values.
+        The multi-component sibling of :meth:`set`: a point is a mapping of
+        ``path -> value`` reaching any of ``params``, ``aerosol`` or
+        ``parcel``. See :mod:`codt_tools.case.mutate`.
 
         Parameters
         ----------
-        base : Case
-            Base case to vary.
-        **param_ranges
-            Keyword arguments mapping parameter names to lists of values.
+        point : mapping
+            ``"<component>.<field>"`` sets one field; a bare
+            ``"<component>"`` replaces the whole component. A callable value
+            is called with the current value and its return used.
+
+        Examples
+        --------
+        >>> case.apply({"params.tref": 22.0, "aerosol.injection_rate": [6e4]})
+        >>> case.apply({"params.tmax": lambda t: 2 * t})
+        """
+        apply_point(self, point)
+
+    def sweep(
+        self,
+        design: Any,
+        name: Callable[[int, Mapping[str, Any]], str] | None = None,
+    ) -> list["Case"]:
+        """One independent case per point of *design*.
+
+        Parameters
+        ----------
+        design : list of dict, or dict of path -> values
+            A list of points is the general form — build it with
+            :func:`~codt_tools.case.mutate.cross` and ordinary list
+            operations. A ``dict`` of ``path -> list of values`` is shorthand
+            for the plain Cartesian case.
+        name : callable, optional
+            ``(index, point) -> str``, for a project's own naming convention.
+            The default is ``{base_name}_{index}``, zero-padded: sweep names
+            become run *directory* names, so an index is always path-safe and
+            never collides. What each index means is recorded by the run's own
+            staged inputs and by the registry, not here.
 
         Returns
         -------
         list[Case]
-            One case per combination.
+            One deep copy of this case per point, each carrying its own
+            ``simulation_name``. This case is not modified.
 
         Examples
         --------
-        >>> cases = Case.sweep(base, tref=[20.0, 21.0], volume_scaling=[13, 50])
-        >>> len(cases)
-        4
-        >>> cases[0].name
-        'default_sim_Tref20.0_VS13'
-        """
-        if not param_ranges:
-            return [base.copy()]
+        >>> cases = base.sweep({"params.tref": [20.0, 21.0, 22.0]})
+        >>> [c.name for c in cases]
+        ['default_sim_000', 'default_sim_001', 'default_sim_002']
 
-        param_names = list(param_ranges.keys())
-        param_values = [param_ranges[k] for k in param_names]
-        base_name = base.name
+        A design that is not a plain product — an LHS sample crossed with a
+        mode axis, filtered, with a control group appended:
+
+        >>> design = cross(lhs_points, mode_points)
+        >>> design = [p for p in design if p["params.n_blob"] <= 5] + controls
+        >>> cases = base.sweep(design, name=lambda i, p: f"EXP002_{i:03d}")
+        """
+        points = as_design(design)
+        names = resolve_names(self.name, points, name)
 
         cases: list[Case] = []
-        for combo in product(*param_values):
-            case = base.copy()
-            parts: list[str] = []
-            for name, value in zip(param_names, combo):
-                case.set(**{name: value})
-                abbrev = Case._SWEEP_ABBREV.get(name.lower(), name)
-                parts.append(f"{abbrev}{value}")
-            case.set(simulation_name=f"{base_name}_{'_'.join(parts)}")
+        for point, run_name in zip(points, names):
+            case = self.copy()
+            case.apply(point)
+            case.set(simulation_name=run_name)
             cases.append(case)
-
         return cases
 
     # ------------------------------------------------------------------

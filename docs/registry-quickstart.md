@@ -78,7 +78,7 @@ from codt_tools.registry import Registry
 
 base = Case()
 base.set(simulation_name="EXP001", tmax=3600.0)
-cases = Case.sweep(base, tref=[18.0, 21.0, 24.0])
+cases = base.sweep({"params.tref": [18.0, 21.0, 24.0]})
 
 with Registry("~/codt_registry.db") as reg:
     reg.create_experiment("EXP001_tref_sensitivity", "Tref sensitivity",

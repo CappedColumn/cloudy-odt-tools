@@ -92,6 +92,27 @@ Removed with the rename: `set_injection` / `set_bins` / `set_parcel` (use
 `__setattr__` dot-proxy. `case.set(**namelist_params)` stays; assigning any
 other attribute now **raises** instead of silently creating a dead one.
 
+### Sweeps: designs and points (0.9.0)
+
+`codt_tools/case/mutate.py`. A **point** is a dict of `path -> value`
+(`params.*`, `aerosol.*`, `parcel.*`, or a bare component name to swap the whole
+object); a **design** is a list of points. `case.apply(point)` applies one in
+place — the multi-component sibling of `case.set()`; `case.sweep(design)`
+returns one independent deep copy per point. `cross(*axes)` is the only
+combinatorial helper: an axis is a list of points (so values that vary
+*together* — LHS samples, paired parameters — need no special syntax) or a dict
+of `path -> values` (expanded to independent axes). It **raises when two crossed
+axes set the same path**; `+` is how two designs are unioned. A callable value
+transforms the current value instead of replacing it. Everything else —
+filtering, control groups, derived values — is plain Python on a list of dicts.
+No sweep DSL, deliberately.
+
+Run names default to `{base_name}_{index}` zero-padded (`_SWEEP_ABBREV` is
+gone — it stringified arrays into directory names and collided silently).
+`name=(index, point) -> str` overrides. **The case layer does not own the
+index → parameters mapping**; that is each run's staged `inputs/` plus the
+registry. A design manifest artifact belongs to the Run layer (Stage 3).
+
 ### Path ownership — where CODT reads and writes
 
 Four namelist keys locate files, and they resolve two different ways:

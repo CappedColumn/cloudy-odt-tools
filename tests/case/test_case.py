@@ -334,64 +334,100 @@ class TestCaseCopy:
 
 
 class TestCaseSweep:
-    """Tests for sweep()."""
+    """Tests for sweep(). Design-building itself lives in test_mutate.py."""
 
-    def test_single_param(self) -> None:
+    def test_dict_shorthand(self) -> None:
         base = Case()
         base.set(simulation_name="sweep_base")
 
-        configs = Case.sweep(base, tref=[20.0, 21.0, 22.0])
+        cases = base.sweep({"params.tref": [20.0, 21.0, 22.0]})
 
-        assert len(configs) == 3
-        for cfg in configs:
-            assert "Tref" in cfg.name
+        assert [c.params.get("tref") for c in cases] == [20.0, 21.0, 22.0]
+        assert [c.name for c in cases] == [
+            "sweep_base_000", "sweep_base_001", "sweep_base_002"
+        ]
 
-        trefs = [cfg.params.get("tref") for cfg in configs]
-        assert trefs == [20.0, 21.0, 22.0]
-
-    def test_cartesian_product(self) -> None:
+    def test_dict_shorthand_is_cartesian(self) -> None:
         base = Case()
-        base.set(simulation_name="sweep_base")
+        cases = base.sweep({
+            "params.tref": [20.0, 21.0, 22.0],
+            "params.volume_scaling": [13, 50],
+        })
+        assert len(cases) == 6
 
-        configs = Case.sweep(
-            base,
-            tref=[20.0, 21.0, 22.0],
-            volume_scaling=[13, 50],
-        )
-
-        assert len(configs) == 6
-
-    def test_unique_names(self) -> None:
+    def test_design_list(self) -> None:
         base = Case()
         base.set(simulation_name="sweep")
 
-        configs = Case.sweep(
-            base, tref=[20.0, 21.0], volume_scaling=[13, 50]
+        cases = base.sweep([
+            {"params.tref": 20.0, "params.n_blob": 1},
+            {"params.tref": 22.0, "params.n_blob": 5},
+        ])
+
+        assert len(cases) == 2
+        assert cases[1].params.get("tref") == 22.0
+        assert cases[1].params.get("n_blob") == 5
+
+    def test_names_are_unique_and_path_safe(self) -> None:
+        """Sweep names become run directory names."""
+        base = Case()
+        base.set(simulation_name="sweep")
+
+        cases = base.sweep({"aerosol.injection_rate": [[5e4], [6e4]]})
+
+        names = [c.name for c in cases]
+        assert names == ["sweep_000", "sweep_001"]
+        assert len(set(names)) == len(names)
+        for name in names:
+            assert not (set(name) & set(" /[](),"))
+
+    def test_name_callable_overrides(self) -> None:
+        base = Case()
+        cases = base.sweep(
+            {"params.tref": [20.0, 21.0]},
+            name=lambda i, point: f"EXP002_Tref{point['params.tref']:.0f}",
         )
+        assert [c.name for c in cases] == ["EXP002_Tref20", "EXP002_Tref21"]
 
-        names = [cfg.name for cfg in configs]
-        assert len(set(names)) == len(names)  # all unique
+    def test_name_callable_must_not_collide(self) -> None:
+        base = Case()
+        with pytest.raises(ValueError, match="unique"):
+            base.sweep({"params.tref": [20.0, 21.0]}, name=lambda i, p: "same")
 
-    def test_independence_from_base(self) -> None:
+    def test_independence_from_base_and_siblings(self) -> None:
         base = Case()
         base.set(simulation_name="base", tref=20.0)
 
-        configs = Case.sweep(base, tref=[25.0, 30.0])
+        cases = base.sweep({"params.tref": [25.0, 30.0]})
+        cases[0].set(tmax=9999.0)
 
-        # Modifying sweep results should not affect base
-        configs[0].set(tmax=9999.0)
         assert base.params.get("tmax") != 9999.0
+        assert cases[1].params.get("tmax") != 9999.0
+        assert base.params.get("tref") == 20.0
 
-    def test_empty_sweep_returns_copy(self) -> None:
+    def test_component_objects_are_not_shared(self) -> None:
+        base = Case()
+        cases = base.sweep({"params.tref": [20.0, 21.0]})
+
+        cases[0].aerosol.set(aerosol_name="KCl")
+
+        assert cases[1].aerosol.aerosol_name != "KCl"
+        assert base.aerosol.aerosol_name != "KCl"
+
+    def test_empty_design_gives_nothing(self) -> None:
+        base = Case()
+        assert base.sweep([]) == []
+
+    def test_no_axes_gives_one_copy(self) -> None:
+        """The empty product is one point that changes nothing."""
         base = Case()
         base.set(simulation_name="base")
 
-        configs = Case.sweep(base)
+        cases = base.sweep({})
 
-        assert len(configs) == 1
-        assert configs[0].name == "base"
-        # Should be a copy, not the same object
-        configs[0].set(tref=99.0)
+        assert len(cases) == 1
+        assert cases[0].name == "base_000"
+        cases[0].set(tref=99.0)
         assert base.params.get("tref") != 99.0
 
 
