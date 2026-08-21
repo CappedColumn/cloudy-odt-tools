@@ -73,34 +73,38 @@ their real core count. See `docs/running-on-slurm.md`.
 ## 2. Create the runs
 
 ```python
-from codt_tools import ExperimentSpec, create_experiment_runs
+from codt_tools import Case, CODTRunner
 from codt_tools.registry import Registry
 
-spec = ExperimentSpec.from_yaml("experiment.yaml")
+base = Case()
+base.set(simulation_name="EXP001", tmax=3600.0)
+cases = Case.sweep(base, tref=[18.0, 21.0, 24.0])
+
 with Registry("~/codt_registry.db") as reg:
-    runner, run_dirs = create_experiment_runs(spec, reg, "~/dev/CODT/codt")
+    reg.create_experiment("EXP001_tref_sensitivity", "Tref sensitivity",
+                          data_root="/path/to/data")
+    runner = CODTRunner("~/dev/CODT/codt",
+                        "/path/to/data/EXP001_tref_sensitivity/runs",
+                        account=..., partition=...,
+                        registry=reg, experiment_id="EXP001_tref_sensitivity")
+    run_dirs = runner.setup_runs(cases)
 ```
 
-Before anything is written, the executable is gated: it must exist and
-report a valid version (`codt --version`). A binary that was not built
-properly (missing/placeholder version info) is refused with
-instructions to rebuild via `./build.sh` — its runs would be
-untraceable.
+> The YAML spec layer (`ExperimentSpec` / `create_experiment_runs`) was removed
+> in codt_tools 0.9.0; the YAML above is still a fine way to *record* a design,
+> but nothing reads it. Shared-input dedup went with it. Check the executable
+> yourself before submitting: `runner.codt_version` must report a real version
+> (a binary not built through `./build.sh` produces untraceable runs).
 
-This registers the experiment (status `planned`), expands the sweep,
-and creates:
+This creates:
 
 ```
-{data_root}/{experiment_id}/
-├── experiment.yaml
-├── shared_inputs/          # inputs identical across runs (content-hash dedup)
-└── runs/{run_id}/
-    ├── inputs/             # params.nml + relative symlinks -> shared_inputs/
+{data_root}/{experiment_id}/runs/{run_id}/
+    ├── inputs/             # params.nml, aerosol_input.nc, [parcel_input.nc]
     └── output/             # CODT writes here
 ```
 
-Run IDs are `{YYYYMMDD_HHMMSS}_{model}_{descriptor}`, e.g.
-`20260709_101500_codt_Tref18.0_VS13`. Each run is registered with all
+Each run is registered with all
 namelist parameters, input-file checksums, the executable's SHA256
 (archived content-addressed), `codt --version` output, and the binary's
 target CPU architecture (`build_arch`).
@@ -114,11 +118,11 @@ SIGILL. Pass `force=True` to override.
 
 ```python
 # SLURM: the whole ensemble goes as ONE job array, packed cores_per_node
-# runs per array task. Walltime defaults to spec.slurm_options["walltime"].
-job_ids = runner.submit(run_dirs)      # -> ['4812345'] (one array job id)
+# runs per array task.
+job_ids = runner.submit(run_dirs, walltime="12:00:00")   # -> ['4812345']
 
 # Or locally, one at a time (blocking):
-proc = runner.run_local(spec.expand()[0])
+proc = runner.run_local(cases[0])
 ```
 
 On submission the experiment flips to `running`. Inside the job each
@@ -206,10 +210,10 @@ point with a specific fix:
 
 | Failure | Where it surfaces | What to change |
 |---|---|---|
-| Executable missing | `create_experiment_runs` raises `FileNotFoundError` before anything is written | The `executable` argument |
-| Improper build (no version info) | `create_experiment_runs` raises `ValueError` before anything is written | Rebuild with `./build.sh`, pass the new binary |
-| Duplicate `experiment_id` | `create_experiment_runs` raises `IntegrityError` | Pick a new `experiment_id` in the YAML |
-| Invalid namelist values | `cfg.validate()` / CODT rejects at startup (stderr + run `failed`) | `base_parameters` / `parameter_sweep` in the YAML |
+| Executable missing | `CODTRunner.run_local` raises `FileNotFoundError` | The `executable` argument |
+| Improper build (no version info) | `runner.codt_version` is None — check it before submitting | Rebuild with `./build.sh`, pass the new binary |
+| Duplicate `experiment_id` | `Registry.create_experiment` raises `IntegrityError` | Pick a new `experiment_id` in the YAML |
+| Invalid namelist values | `case.validate()` / CODT rejects at startup (stderr + run `failed`) | `base_parameters` / `parameter_sweep` in the YAML |
 | sbatch rejected (bad account/partition) | `runner.submit` raises `CalledProcessError` | `slurm_options` in the YAML |
 | Run crashes / exits nonzero | Run marked `failed` with exit code; `detail` names the run's `.log` and the batch `*.out` file | Diagnose from those logs (see `codt-registry show <run_id>`) |
 | Job killed (walltime, OOM, node death) | Run stuck in `running`; SLURM job gone | Cross-check `sacct`, backfill status from the `_DONE` marker; raise `walltime` in the YAML and resubmit |

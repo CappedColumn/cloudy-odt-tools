@@ -18,7 +18,7 @@ from typing import Union
 import numpy as np
 import xarray as xr
 
-from codt_tools.config import Namelist
+from codt_tools.case import Namelist
 from codt_tools.registry.versions import check_conventions
 from codt_tools.plotting import (
     _ensure_ax,

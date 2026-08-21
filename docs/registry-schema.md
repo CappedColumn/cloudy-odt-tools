@@ -102,7 +102,7 @@ aerosol file (`check_seeding_consistency`). `do_seeding` is the sole controller,
 so the gate is **one-way**: `do_seeding=.true.` with no seed group is fatal
 (nothing to seed), but `do_seeding=.false.` with a group present is **fine** —
 CODT ignores the dormant group, which is what lets one file serve both a seeded
-and an unseeded run. Only the fatal direction warns. `CODTConfig.validate()`
+and an unseeded run. Only the fatal direction warns. `Case.validate()`
 makes the same check against the in-memory config (and warns, not raises, on a
 dormant group); the registry check is against the file actually on disk, which
 additionally catches a shared or symlinked aerosol input swapped after the

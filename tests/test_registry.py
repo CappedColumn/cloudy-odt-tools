@@ -10,7 +10,7 @@ from pathlib import Path
 import netCDF4 as nc
 import pytest
 
-from codt_tools.config import CODTConfig
+from codt_tools.case import Case
 from codt_tools.registry import (
     SCHEMA_VERSION,
     IncompatibleConventionsError,
@@ -39,21 +39,18 @@ def registry(tmp_path):
 
 @pytest.fixture
 def run_dir(tmp_path):
-    """A run directory with inputs/ written by a real CODTConfig."""
-    config = CODTConfig()
+    """A run directory with inputs/ written by a real Case."""
+    config = Case()
     config.set(simulation_name="test_run")
     rdir = tmp_path / "exp" / "runs" / "test_run"
-    inputs = rdir / "inputs"
-    inputs.mkdir(parents=True)
-    config.injection.write(inputs / "aerosol_input.nc")
-    config.params.set(aerosol_file="aerosol_input.nc")
-    config.params.write(inputs / "params.nml")
-    return rdir, config
+    staged = config.write_inputs(rdir / "inputs", output_directory=rdir / "output")
+    return rdir, config, staged
 
 
 def _register(reg: Registry, run_dir_config, run_id: str = "20260708_000000_codt_test",
               **kwargs) -> str:
-    rdir, config = run_dir_config
+    rdir, config, staged = run_dir_config
+    kwargs.setdefault("namelist", staged)
     return reg.register_run(run_id, config, rdir, **kwargs)
 
 
@@ -275,12 +272,12 @@ class TestVersions:
 
     def test_inspect_detects_seed_group(self, tmp_path):
         """Probes the seed_bin dimension, as CODT's own reader does."""
-        config = CODTConfig()
+        config = Case()
         plain = tmp_path / "plain.nc"
-        config.injection.write(plain)
+        config.aerosol.write(plain)
         assert inspect_input_file(plain) == ("CODT_aerosol_input_v1", False)
 
-        config.injection.set_seed_group(
+        config.aerosol.set_seed_group(
             seed_edge_radii=[500.0, 1000.0, 2000.0],
             seed_category=[7, 8],
             seed_bin_type=[2, 2],
@@ -290,7 +287,7 @@ class TestVersions:
             n_types=2,
         )
         seeded = tmp_path / "seeded.nc"
-        config.injection.write(seeded)
+        config.aerosol.write(seeded)
         # Same conventions string either way — presence is the only signal.
         assert inspect_input_file(seeded) == ("CODT_aerosol_input_v1", True)
 
@@ -361,7 +358,7 @@ class TestRuns:
         ).fetchall()
         by_type = {r["file_type"]: r for r in rows}
         assert set(by_type) == {"namelist", "aerosol_input"}
-        rdir, _ = run_dir
+        rdir, _, _ = run_dir
         expected = sha256_file(rdir / "inputs" / "params.nml")
         assert by_type["namelist"]["checksum"] == expected
 
@@ -383,8 +380,8 @@ class TestRuns:
 
     def test_seeded_run_is_queryable(self, registry, run_dir):
         """A seeded run is identifiable despite sharing v1 with unseeded runs."""
-        rdir, config = run_dir
-        config.injection.set_seed_group(
+        rdir, config, staged = run_dir
+        config.aerosol.set_seed_group(
             seed_edge_radii=[500.0, 1000.0, 2000.0],
             seed_category=[7, 8],
             seed_bin_type=[2, 2],
@@ -393,9 +390,9 @@ class TestRuns:
             seed_concentration=[10.0, 5.0],
             n_types=2,
         )
-        config.injection.write(rdir / "inputs" / "aerosol_input.nc")
+        config.aerosol.write(rdir / "inputs" / "aerosol_input.nc")
         config.params.set(do_seeding=True)
-        run_id = _register(registry, (rdir, config))
+        run_id = _register(registry, (rdir, config, staged))
 
         seeded = registry._conn.execute(
             "SELECT run_id FROM input_files WHERE has_seed_group = 1"
@@ -406,10 +403,10 @@ class TestRuns:
         self, registry, run_dir
     ):
         """CODT aborts on this; surface it before a submit, not after."""
-        rdir, config = run_dir
-        config.params.set(do_seeding=True)
+        rdir, config, staged = run_dir
+        staged.set(do_seeding=True)
         with pytest.warns(UserWarning, match="no seed group"):
-            _register(registry, (rdir, config))
+            _register(registry, (rdir, config, staged))
 
     def test_dormant_seed_group_registers_cleanly(self, registry, run_dir):
         """Seed group present but do_seeding off is valid — CODT ignores it.
@@ -417,8 +414,8 @@ class TestRuns:
         The group is still recorded (a run that could seed but didn't), and
         registration does not warn about the one-way gate.
         """
-        rdir, config = run_dir
-        config.injection.set_seed_group(
+        rdir, config, staged = run_dir
+        config.aerosol.set_seed_group(
             seed_edge_radii=[500.0, 1000.0, 2000.0],
             seed_category=[7, 8],
             seed_bin_type=[2, 2],
@@ -427,11 +424,11 @@ class TestRuns:
             seed_concentration=[10.0, 5.0],
             n_types=2,
         )
-        config.injection.write(rdir / "inputs" / "aerosol_input.nc")
+        config.aerosol.write(rdir / "inputs" / "aerosol_input.nc")
         # do_seeding stays False (the run_dir default).
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            run_id = _register(registry, (rdir, config))
+            run_id = _register(registry, (rdir, config, staged))
         row = registry._conn.execute(
             "SELECT has_seed_group FROM input_files WHERE run_id = ? AND "
             "file_type = 'aerosol_input'",
@@ -440,14 +437,14 @@ class TestRuns:
         assert row["has_seed_group"] == 1
 
     def test_symlinked_input_recorded(self, registry, tmp_path, run_dir):
-        rdir, config = run_dir
+        rdir, config, staged = run_dir
         shared = rdir.parent.parent / "shared_inputs"
         shared.mkdir()
         real = rdir / "inputs" / "aerosol_input.nc"
         target = shared / "aerosol_input.nc"
         real.rename(target)
         real.symlink_to(Path("..") / ".." / ".." / "shared_inputs" / "aerosol_input.nc")
-        run_id = _register(registry, (rdir, config))
+        run_id = _register(registry, (rdir, config, staged))
         row = registry._conn.execute(
             "SELECT * FROM input_files WHERE run_id = ? AND file_type = "
             "'aerosol_input'",
@@ -469,10 +466,10 @@ class TestRuns:
         assert row["param_type"] == "integer"
 
     def test_run_linked_to_experiment_relative_dir(self, registry, run_dir):
-        rdir, config = run_dir
+        rdir, config, staged = run_dir
         data_root = rdir.parent.parent  # tmp/exp
         registry.create_experiment("exp1", "One", data_root=data_root)
-        run_id = _register(registry, (rdir, config), experiment_id="exp1")
+        run_id = _register(registry, (rdir, config, staged), experiment_id="exp1")
         run = registry.get_run(run_id)
         assert run["run_dir"] == "runs/test_run"
 

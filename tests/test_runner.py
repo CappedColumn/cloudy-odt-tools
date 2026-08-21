@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from codt_tools.config import CODTConfig
+from codt_tools.case import Case, Namelist
 from codt_tools.runner import CODTRunner
 
 
@@ -46,9 +46,9 @@ def runner(tmp_path: Path) -> CODTRunner:
 
 
 @pytest.fixture
-def config() -> CODTConfig:
+def config() -> Case:
     """Create a default config."""
-    cfg = CODTConfig()
+    cfg = Case()
     cfg.set(simulation_name="test_sim")
     return cfg
 
@@ -57,7 +57,7 @@ class TestSetupRun:
     """Tests for setup_run and setup_runs."""
 
     def test_creates_directory_structure(
-        self, runner: CODTRunner, config: CODTConfig
+        self, runner: CODTRunner, config: Case
     ) -> None:
         sim_dir = runner.setup_run(config)
 
@@ -67,33 +67,51 @@ class TestSetupRun:
         assert (sim_dir / "output").is_dir()
 
     def test_sim_dir_path(
-        self, runner: CODTRunner, config: CODTConfig
+        self, runner: CODTRunner, config: Case
     ) -> None:
         sim_dir = runner.setup_run(config)
 
         expected = runner.base_output_dir / "test_sim"
         assert sim_dir == expected
 
-    def test_auto_sets_output_directory(
-        self, runner: CODTRunner, config: CODTConfig
+    def test_written_namelist_points_at_the_run_output_dir(
+        self, runner: CODTRunner, config: Case
     ) -> None:
-        runner.setup_run(config)
+        """CODT resolves a relative output_directory against its own cwd, so
+        the staged value must be absolute and run-specific."""
+        sim_dir = runner.setup_run(config)
 
-        assert config.params.get("output_directory") == str(
+        written = Namelist(sim_dir / "inputs" / "params.nml")
+        assert written.get("output_directory") == str(
             runner.base_output_dir / "test_sim" / "output"
         )
+        assert written.get("aerosol_file") == "aerosol_input.nc"
 
-    def test_auto_sets_data_paths(
-        self, runner: CODTRunner, config: CODTConfig
+    def test_does_not_mutate_the_case(
+        self, runner: CODTRunner, config: Case
     ) -> None:
+        """Staging a run must leave the case reusable for the next run."""
+        before = config.params.groups_for_write()
         runner.setup_run(config)
 
-        assert config.params.get("aerosol_file") == "aerosol_input.nc"
+        assert config.params.groups_for_write() == before
+        assert config.params.get("output_directory") == ""
+
+    def test_one_case_stages_two_independent_runs(
+        self, runner: CODTRunner, config: Case
+    ) -> None:
+        first = runner.setup_run(config, run_id="run_a")
+        second = runner.setup_run(config, run_id="run_b")
+
+        out_a = Namelist(first / "inputs" / "params.nml").get("output_directory")
+        out_b = Namelist(second / "inputs" / "params.nml").get("output_directory")
+        assert out_a == str(first / "output")
+        assert out_b == str(second / "output")
 
     def test_setup_runs_batch(self, runner: CODTRunner) -> None:
         configs = []
         for i in range(3):
-            cfg = CODTConfig()
+            cfg = Case()
             cfg.set(simulation_name=f"batch_{i}")
             configs.append(cfg)
 
@@ -105,12 +123,12 @@ class TestSetupRun:
             assert (sim_dir / "inputs" / "params.nml").is_file()
 
     def test_namelist_content_readable(
-        self, runner: CODTRunner, config: CODTConfig
+        self, runner: CODTRunner, config: Case
     ) -> None:
         """Verify the written namelist can be read back."""
         sim_dir = runner.setup_run(config)
 
-        reloaded = CODTConfig(sim_dir / "inputs" / "params.nml")
+        reloaded = Case.from_input_dir(sim_dir / "inputs")
         assert reloaded.name == "test_sim"
 
 
@@ -267,7 +285,7 @@ class TestPreflight:
     """submit() refuses targets that cannot run the binary."""
 
     def test_raises_on_mismatch(
-        self, runner: CODTRunner, config: CODTConfig, monkeypatch
+        self, runner: CODTRunner, config: Case, monkeypatch
     ) -> None:
         from codt_tools import slurm as slurm_mod
 
@@ -280,7 +298,7 @@ class TestPreflight:
             runner.submit([sim_dir], dry_run=True)
 
     def test_force_downgrades_to_warning(
-        self, runner: CODTRunner, config: CODTConfig, monkeypatch
+        self, runner: CODTRunner, config: Case, monkeypatch
     ) -> None:
         from codt_tools import slurm as slurm_mod
 
@@ -298,7 +316,7 @@ class TestSubmit:
     """Tests for submit (dry_run mode)."""
 
     def test_dry_run_writes_scripts(
-        self, runner: CODTRunner, config: CODTConfig
+        self, runner: CODTRunner, config: Case
     ) -> None:
         sim_dir = runner.setup_run(config)
 
@@ -322,7 +340,7 @@ class TestSubmit:
         """With cores_per_node=4, 7 sims produce one array of 2 tasks."""
         configs = []
         for i in range(7):
-            cfg = CODTConfig()
+            cfg = Case()
             cfg.set(simulation_name=f"batch_test_{i}")
             configs.append(cfg)
 
@@ -379,7 +397,7 @@ class TestSubmit:
         assert "#SBATCH --array=0-3" in script
 
     def test_script_name_is_unique_per_submit(
-        self, runner: CODTRunner, config: CODTConfig
+        self, runner: CODTRunner, config: Case
     ) -> None:
         """Repeat submits must not overwrite each other's scripts."""
         sim_dir = runner.setup_run(config)
@@ -417,11 +435,10 @@ class TestCollect:
         # Set up run directory with namelist pointing to custom output
         out = tmp_path / "real_output"
         out.mkdir(parents=True)
-        cfg = CODTConfig()
-        cfg.set(simulation_name=name, output_directory=str(out))
+        cfg = Case()
+        cfg.set(simulation_name=name)
         inputs_dir = base / name / "inputs"
-        inputs_dir.mkdir(parents=True)
-        cfg.params.write(inputs_dir / "params.nml")
+        cfg.write_inputs(inputs_dir, output_directory=out)
 
         # Put output in the custom directory
         _create_main_nc(out, name=name)
@@ -477,7 +494,7 @@ class TestRegistryHooks:
         yield runner, registry
         registry.close()
 
-    def test_setup_run_registers(self, reg_runner, config: CODTConfig) -> None:
+    def test_setup_run_registers(self, reg_runner, config: Case) -> None:
         runner, registry = reg_runner
         runner.setup_run(config, run_id="20260708_000000_codt_test")
         run = registry.get_run("20260708_000000_codt_test")
@@ -485,7 +502,7 @@ class TestRegistryHooks:
         assert run["experiment_id"] == "exp1"
 
     def test_setup_run_defaults_to_sim_name(
-        self, reg_runner, config: CODTConfig
+        self, reg_runner, config: Case
     ) -> None:
         runner, registry = reg_runner
         sim_dir = runner.setup_run(config)
@@ -493,7 +510,7 @@ class TestRegistryHooks:
         assert registry.get_run("test_sim")["status"] == "registered"
 
     def test_sbatch_contains_registry_lines(
-        self, reg_runner, config: CODTConfig
+        self, reg_runner, config: Case
     ) -> None:
         runner, registry = reg_runner
         sim_dir = runner.setup_run(config)
@@ -513,7 +530,7 @@ class TestRegistryHooks:
         assert "|| true" in script
 
     def test_sbatch_without_registry_has_no_hooks(
-        self, runner: CODTRunner, config: CODTConfig
+        self, runner: CODTRunner, config: Case
     ) -> None:
         sim_dir = runner.setup_run(config)
         script = runner._generate_array_sbatch(
@@ -525,7 +542,7 @@ class TestRegistryHooks:
         from conftest import _create_main_nc
 
         runner, registry = reg_runner
-        cfg = CODTConfig()
+        cfg = Case()
         cfg.set(simulation_name="col_sim")
         sim_dir = runner.setup_run(cfg)
         out = sim_dir / "output"
@@ -542,7 +559,7 @@ class TestRegistryHooks:
         from conftest import _create_main_nc
 
         runner, registry = reg_runner
-        cfg = CODTConfig()
+        cfg = Case()
         cfg.set(simulation_name="innername")
         sim_dir = runner.setup_run(cfg, run_id="20260708_000000_codt_x")
         out = sim_dir / "output"
@@ -563,3 +580,48 @@ class TestRepr:
         assert "CODTRunner" in r
         assert "owner-guest" in r
         assert "notchpeak-guest" in r
+
+
+class TestAbsoluteNamelistPath:
+    """CODT resolves aerosol_file / parcel_file against the directory of the
+    namelist path *as typed on the command line* (app/main.f90:43). Passing an
+    absolute path is what makes the bare staged filenames resolve from any
+    working directory, so both launch paths are pinned here.
+    """
+
+    def test_local_run_invokes_with_an_absolute_namelist_path(
+        self, runner: CODTRunner, config: Case, monkeypatch, tmp_path
+    ) -> None:
+        exe = tmp_path / "CODT"
+        exe.write_bytes(b"\x7fELF")
+        exe.chmod(0o755)
+        runner.executable = exe
+
+        seen: list[list[str]] = []
+
+        class _Proc:
+            returncode = 0
+
+        def _fake_run(cmd, **kwargs):
+            seen.append(cmd)
+            return _Proc()
+
+        monkeypatch.setattr("subprocess.run", _fake_run)
+        runner.run_local(config)
+
+        nml_arg = Path(seen[0][1])
+        assert nml_arg.is_absolute()
+        assert nml_arg.name == "params.nml"
+
+    def test_array_script_invokes_with_an_absolute_namelist_path(
+        self, runner: CODTRunner, config: Case
+    ) -> None:
+        sim_dir = runner.setup_run(config)
+        results = runner.submit([sim_dir], walltime="01:00:00", dry_run=True)
+
+        script = Path(results[0]).read_text()
+        assert '"$RUN_DIR/inputs/params.nml"' in script or \
+               '"${RUNS[$i]}/inputs/params.nml"' in script
+        manifest = next(Path(results[0]).parent.glob("*.manifest"))
+        for run_dir in manifest.read_text().split():
+            assert Path(run_dir).is_absolute()

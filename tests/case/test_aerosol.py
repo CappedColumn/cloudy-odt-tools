@@ -7,7 +7,7 @@ import pytest
 
 import netCDF4 as nc
 
-from codt_tools.aerosol_io import (
+from codt_tools.case.aerosol import (
     SEED_KEYS,
     make_seed_group,
     read_aerosol,

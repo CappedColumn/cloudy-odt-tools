@@ -75,11 +75,63 @@ Global attrs on NC files: `conventions`, `code_version` (git-describe string fro
 
 ## Simulation Registry
 
-`codt_tools/registry/` tracks experiments and runs in SQLite (docs in `docs/registry-*.md`). DB location convention: `--db` or `$CODT_REGISTRY_DB`; the DB lives on home/group space, never scratch. All access goes through `Registry` / the `codt-registry` CLI (pragmas, retry, txn coupling live in Python — never raw sqlite3 writes). Gate rule: `SUPPORTED_CONVENTIONS` (registry/versions.py) is the single source of truth for readable output conventions; `CODTSimulation.__init__` and `record_completion` warn on mismatch (`strict=True` raises). `SUPPORTED_INPUT_CONVENTIONS` is the input-side equivalent (parcel v3 only, aerosol v1) — `register_run` records each NetCDF input's conventions plus the aerosol seed-group flag, and cross-checks `do_seeding`. Bump both via the codt-versioning skill when formats change. Experiments: `ExperimentSpec` YAML → `create_experiment_runs` → `{data_root}/{experiment_id}/{experiment.yaml, shared_inputs/, runs/{run_id}/}` with content-hash dedup of shared inputs as relative symlinks; run_id = `{stamp}_{model}_{descriptor}`.
+`codt_tools/registry/` tracks experiments and runs in SQLite (docs in `docs/registry-*.md`). DB location convention: `--db` or `$CODT_REGISTRY_DB`; the DB lives on home/group space, never scratch. All access goes through `Registry` / the `codt-registry` CLI (pragmas, retry, txn coupling live in Python — never raw sqlite3 writes). Gate rule: `SUPPORTED_CONVENTIONS` (registry/versions.py) is the single source of truth for readable output conventions; `CODTSimulation.__init__` and `record_completion` warn on mismatch (`strict=True` raises). `SUPPORTED_INPUT_CONVENTIONS` is the input-side equivalent (parcel v3 only, aerosol v1) — `register_run` records each NetCDF input's conventions plus the aerosol seed-group flag, and cross-checks `do_seeding`. Bump both via the codt-versioning skill when formats change. `register_run` takes an optional `namelist=` (the staged `Namelist` returned by `Case.write_inputs`) and records *that* — what the run actually reads — rather than the case's own neutral paths. The YAML experiment layer (`experiment.py`, `ExperimentSpec`, `create_experiment_runs`) was **deleted in 0.9.0**; it had no callers. Experiments still exist as registry rows, created through `Registry.create_experiment` / the CLI.
+
+## Case Layer (0.9.0)
+
+`codt_tools/case/` replaces `config.py`: `Case` (was `CODTConfig`), `Namelist`,
+`Aerosol` (was `InjectionData`, attribute `case.aerosol`), `Parcel` (was
+`ParcelInput`), plus `case/validate.py` (`validate_case`,
+`lem_turbulence_scales`, `initial_launch_level`). The old `aerosol_io.py` /
+`parcel_io.py` are folded into `case/aerosol.py` / `case/parcel.py`, their
+functions still public. No compatibility aliases — 0.9.0 is a clean break; code
+pinned to the old names uses the `v0.8.0` tag (`codt08` env).
+
+Removed with the rename: `set_injection` / `set_bins` / `set_parcel` (use
+`case.aerosol.set(...)` / `case.parcel.set(...)`) and the `__getattr__` /
+`__setattr__` dot-proxy. `case.set(**namelist_params)` stays; assigning any
+other attribute now **raises** instead of silently creating a dead one.
+
+### Path ownership — where CODT reads and writes
+
+Four namelist keys locate files, and they resolve two different ways:
+
+| Key | Read at (CODT) | Resolved against |
+|---|---|---|
+| `aerosol_file` | `src/droplets.f90:996` | `namelist_dir` |
+| `parcel_file` | `src/parcel.f90:119` | `namelist_dir` |
+| `mie_data_file` | `src/radiation.f90:670` | `namelist_dir` |
+| `output_directory` | `src/initialize.f90:246` | **the process's cwd** |
+
+`namelist_dir` is the parent of argv[1] *as typed* (`app/main.f90:43`);
+`resolve_path` (`globals.f90:417`) takes absolute values as-is. So a relative
+`output_directory` lands wherever the job started, and a stale absolute one
+points at another run's directory (only caught when `overwrite=.false.` finds
+the `.nc`).
+
+codt_tools therefore treats the first three as **staging-owned**:
+
+- a `Case` carries none of them — defaults are `output_directory=""`,
+  `aerosol_file="aerosol_input.nc"`, `parcel_file=""`, and `from_input_dir` /
+  `from_simulation` normalize back to those after using the stored paths to
+  *find* the files;
+- `case.set()` raises on all three, naming `write_inputs` instead;
+- **`Case.write_inputs(directory, output_directory=None)` is the only place
+  they are assigned**, and it assigns all of them from its own arguments every
+  call, returning the staged `Namelist` (defaults to `directory/output`,
+  resolved absolute, and creates it so CODT's parent-exists check passes);
+- `Namelist.write()` refuses a namelist whose `output_directory` is empty;
+- `mie_data_file` is user-owned as a source path and **copied into the input
+  directory** at write time, referenced by basename — previously a relative Mie
+  path resolved against `inputs/`, where nothing was ever staged.
+
+The invariant that makes bare filenames safe: the model is always invoked with
+an **absolute** namelist path (`runner.run_local`, both sbatch bodies), tested
+in `tests/test_runner.py::TestAbsoluteNamelistPath`.
 
 ## Runner Layout
 
-`CODTRunner.setup_run` creates `{base}/{run_name}/` with `inputs/` (params.nml, aerosol_input.nc) and an empty `output/` (model writes here). The namelist `output_directory` is set to the absolute `output/` path; `executable` and `base_output_dir` are resolved to absolute in `__init__`, so local runs and generated sbatch scripts are cwd-independent. `aerosol_file` stays relative (`aerosol_input.nc`) and CODT resolves it against the namelist's parent (`inputs/`).
+`CODTRunner.setup_run` creates `{base}/{run_name}/` with `inputs/` (params.nml, aerosol_input.nc) and an `output/` the model writes into. It calls `case.write_inputs(inputs_dir, output_directory=output_dir)`, which **does not modify the case** — one case stages any number of runs. The written namelist's `output_directory` is the absolute `output/` path; `executable` and `base_output_dir` are resolved to absolute in `__init__`, so local runs and generated sbatch scripts are cwd-independent. `aerosol_file` stays relative (`aerosol_input.nc`) and CODT resolves it against the namelist's parent (`inputs/`).
 
 `CODTRunner` queries `codt --version` at init and stores the result in `self.codt_version` (None if binary is missing or doesn't support `--version`).
 
@@ -91,11 +143,11 @@ Submission is now **one job array per ensemble**, not one sbatch per batch: `_ge
 
 Registry schema **v4** adds `build_arch` on `runs` (recorded at registration; NULL for pre-v4 rows). Group entitlement: notchpeak Rome is **freecycle-only**, `notchpeak-shared-short` has no Rome nodes, granite Genoa needs a zen4 build.
 
-`CODTConfig.validate()` mirrors the Fortran-side checks: range validation (N, tmax, H, pres, volume_scaling, Tref, simulation_mode) raises `ValueError`; cross-namelist inconsistencies (do_radiation without do_microphysics, write_eddies without do_turbulence, do_entrainment in chamber mode) issue `warnings.warn`.
+`Case.validate()` (`case/validate.py`) mirrors the Fortran-side checks: range validation (N, tmax, H, pres, volume_scaling, Tref, simulation_mode) raises `ValueError`; cross-namelist inconsistencies (do_radiation without do_microphysics, write_eddies without do_turbulence, do_entrainment in chamber mode) issue `warnings.warn`.
 
 ### Namelist group placement (must match what CODT reads)
 
-`Namelist._DEFAULTS` groups map 1:1 to the Fortran namelist of the same name. A param in the wrong group makes CODT reject the file (`Invalid parameter in &GROUP`). Defaults are aligned to CODT's **code** defaults (`docs/input_parameters.md`). Mode/switch gating in `_groups_for_write`: chamber omits `turbulence_lem`/`parcel`/`entrainment`; parcel omits `turbulence_odt`/`specialeffects`; `radiation` only when `do_radiation`; `entrainment` only when `do_entrainment`.
+`Namelist._DEFAULTS` groups map 1:1 to the Fortran namelist of the same name. A param in the wrong group makes CODT reject the file (`Invalid parameter in &GROUP`). Defaults are aligned to CODT's **code** defaults (`docs/input_parameters.md`). Mode/switch gating in `Namelist.groups_for_write()` (public since 0.9.0): chamber omits `turbulence_lem`/`parcel`/`entrainment`; parcel omits `turbulence_odt`/`specialeffects`; `radiation` only when `do_radiation`; `entrainment` only when `do_entrainment`.
 
 - `do_entrainment` → `&PARAMETERS` (not `&PARCEL`)
 - `pressure_limit` → `&PARCEL` (not `&PARAMETERS`)
@@ -159,6 +211,11 @@ dt_record = np.dtype([('id_keep','<i4'),('id_kill','<i4'),('r_keep','<f8'),('r_k
 
 ## Merged
 
+- **Case layer** (codt_tools 0.9.0.dev0, Stage 1 of the `docs/refactor-plan.md`
+  refactor): `config.py` → `codt_tools/case/`, `CODTConfig`/`InjectionData`/
+  `ParcelInput` → `Case`/`Aerosol`/`Parcel`, `experiment.py` deleted, and file
+  locations moved out of the case and into `write_inputs`. Breaking, no aliases.
+  See "Case Layer (0.9.0)" above.
 - **Arch-aware array SLURM submission** (codt_tools v0.8.0): new
   `codt_tools/slurm.py`, job-array submission, registry schema v4
   (`build_arch`). No CODT-side change. See "Architecture-aware SLURM
@@ -207,8 +264,8 @@ Consequences for anything reading or writing these parameters:
 parcel writer never received, so `write_parcel` and `ParcelInput.write` take an
 optional `n_grid` (the `&PARAMETERS N` the run will use). Pass it and
 `int(psigma*N) >= n_blob` is checked per leg; omit it and that check is left to
-CODT at run time — existing callers keep working. `CODTConfig.write` supplies it
-automatically. `CODTConfig.validate()` mirrors CODT's startup abort for the
+CODT at run time — existing callers keep working. `Case.write_inputs` supplies
+it automatically. `Case.validate()` mirrors CODT's startup abort for the
 `&ENTRAINMENT` scalars *and* the per-leg schedule when `do_entrainment` is on.
 Note the parcel branch runs `_validate_lem_scales()` first, so a too-coarse `N`
 raises there before the entrainment check is reached.
@@ -283,7 +340,7 @@ CODT now also **aborts at startup** when `smallest_eddy_gridpoints > N` or
   reproduces CODT's single-precision `1./3.` and `4./3.` literals; agreement with
   the output attributes is then ~4e-9 relative, the floor set by gfortran's `**`
   vs libm `pow`.
-- `CODTConfig.validate()` mirrors the new startup aborts: parcel raises on
+- `Case.validate()` mirrors the new startup aborts: parcel raises on
   `smallest_eddy_gridpoints > N` and `smallest_eddy_scale >= integral_length_scale`
   and warns when the scale separation is < 3 (**this warning fires on the
   defaults**, matching CODT on its bundled `params.nml`); chamber raises when
@@ -341,7 +398,7 @@ a CODT 2.0.0 binary.
   all-or-nothing **seed group** (`seed_bin`/`seed_edge`/`seed_event` dims)
   carrying a second aerosol population with its own bins, CDF, and event
   schedule. New `&MICROPHYSICS`: `do_seeding`, `seed_hydration`,
-  `seed_growth_time`. Build one via `cfg.injection.set_seed_group(...)`.
+  `seed_growth_time`. Build one via `case.aerosol.set_seed_group(...)`.
 - **Version strings can't answer the questions you'll ask.** Output conventions
   stayed `CODT_output_v1`, so new output vars (`parcel_height_env`, per-leg
   `ent_rate`) must be detected by *variable presence*. Aerosol stayed v1, so
@@ -353,7 +410,7 @@ a CODT 2.0.0 binary.
   `do_seeding=.false.` with a seed group present is **fine**: CODT never reads
   the group, just warns, so one aerosol file can serve both a seeded and an
   unseeded run (the bundled `input/aerosol_input.nc` ships with a group for
-  exactly this). `CODTConfig.validate()` mirrors this (raises on the fatal case,
+  exactly this). `Case.validate()` mirrors this (raises on the fatal case,
   warns on a dormant group), and `Registry.register_run` re-checks against the
   staged file (catching a swapped shared input) and records `has_seed_group`.
 - **Two gotchas that will bite a writer:**

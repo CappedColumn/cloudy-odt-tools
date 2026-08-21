@@ -177,7 +177,7 @@ def check_seeding_consistency(
       the group (never reads it) and merely prints a warning, which is what lets
       one file serve both a seeded and an unseeded run. This returns True.
 
-    Unlike the equivalent check in ``CODTConfig.validate()``, this inspects the
+    Unlike the equivalent check in ``Case.validate()``, this inspects the
     file actually staged in the run directory — catching a shared or symlinked
     aerosol input swapped after the config was built.
 

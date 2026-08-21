@@ -17,7 +17,7 @@ the batch script). Without a registry, behavior is unchanged.
 
 Example usage::
 
-    from codt_tools import CODTConfig, CODTRunner
+    from codt_tools import Case, CODTRunner
     from codt_tools.registry import Registry
 
     runner = CODTRunner(
@@ -28,14 +28,14 @@ Example usage::
         registry=Registry("~/codt_registry.db"),   # optional
     )
 
-    cfg = CODTConfig()
-    cfg.set(simulation_name="test_run", tref=22.0, tmax=3600.0)
+    case = Case()
+    case.set(simulation_name="test_run", tref=22.0, tmax=3600.0)
 
     # Local (blocking) execution
-    result = runner.run_local(cfg)
+    result = runner.run_local(case)
 
     # Or SLURM batch submission
-    sim_dir = runner.setup_run(cfg)
+    sim_dir = runner.setup_run(case)
     job_ids = runner.submit([sim_dir], walltime="04:00:00")
 """
 
@@ -51,7 +51,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Union
 
 from codt_tools import slurm as slurm_mod
-from codt_tools.config import CODTConfig
+from codt_tools.case import Case
 
 if TYPE_CHECKING:
     from codt_tools.registry import Registry
@@ -193,7 +193,7 @@ class CODTRunner:
 
     def setup_run(
         self,
-        config: CODTConfig,
+        config: Case,
         run_id: str | None = None,
         register: bool = True,
     ) -> Path:
@@ -206,14 +206,16 @@ class CODTRunner:
                 output/   (created empty; model writes here)
 
         ``run_name`` is *run_id* if given, else the simulation name. The
-        namelist ``output_directory`` is set to the absolute ``output/``
-        path. With a registry attached, the run is registered under
-        ``run_name`` with status ``registered``.
+        written namelist points ``output_directory`` at the absolute
+        ``output/`` path; *config* itself is left untouched, so one case can
+        be staged into any number of run directories. With a registry
+        attached, the run is registered under ``run_name`` with status
+        ``registered``.
 
         Parameters
         ----------
-        config : CODTConfig
-            Simulation configuration.
+        config : Case
+            Simulation case. Not modified.
         run_id : str, optional
             Registry run identifier and directory name
             (e.g. ``20260708_143022_codt_v2.1_control``).
@@ -232,9 +234,10 @@ class CODTRunner:
         inputs_dir = sim_dir / "inputs"
         output_dir = sim_dir / "output"
 
-        output_dir.mkdir(parents=True, exist_ok=True)
-        config.params.set(output_directory=str(output_dir))
-        config.write(inputs_dir)
+        # The case is not modified: write_inputs derives the namelist that
+        # names this run's directories and returns it, so what the registry
+        # records is what CODT will read.
+        staged = config.write_inputs(inputs_dir, output_directory=output_dir)
 
         if register and self.registry is not None:
             self.registry.register_run(
@@ -245,19 +248,20 @@ class CODTRunner:
                 executable_path=self.executable,
                 code_version=self.codt_version,
                 build_arch=self.build_arch,
+                namelist=staged,
             )
         return sim_dir
 
     def setup_runs(
         self,
-        configs: list[CODTConfig],
+        configs: list[Case],
         run_ids: list[str] | None = None,
     ) -> list[Path]:
         """Create run directories for multiple simulations.
 
         Parameters
         ----------
-        configs : list[CODTConfig]
+        configs : list[Case]
             List of simulation configurations.
         run_ids : list[str], optional
             Registry run identifiers, one per config.
@@ -281,7 +285,7 @@ class CODTRunner:
 
     def run_local(
         self,
-        config: CODTConfig,
+        config: Case,
         run_id: str | None = None,
     ) -> subprocess.CompletedProcess:
         """Set up and run a single simulation locally (blocking).
@@ -293,7 +297,7 @@ class CODTRunner:
 
         Parameters
         ----------
-        config : CODTConfig
+        config : Case
             Simulation configuration.
         run_id : str, optional
             Registry run identifier (defaults to the simulation name).
@@ -714,7 +718,7 @@ class CODTRunner:
             return output_dir
         nml_path = self.base_output_dir / name / "inputs" / "params.nml"
         if nml_path.is_file():
-            from codt_tools.config import Namelist
+            from codt_tools.case import Namelist
             nml = Namelist(nml_path)
             out = Path(nml.get("output_directory"))
             if not out.is_absolute():

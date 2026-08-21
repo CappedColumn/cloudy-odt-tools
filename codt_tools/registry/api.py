@@ -29,7 +29,7 @@ from codt_tools.registry.versions import (
 )
 
 if TYPE_CHECKING:
-    from codt_tools.config import CODTConfig
+    from codt_tools.case import Case, Namelist
 
 # File types recognized in a run's inputs/ directory, mapped from file name.
 _INPUT_FILE_TYPES: dict[str, str] = {
@@ -226,9 +226,10 @@ class Registry:
     def register_run(
         self,
         run_id: str,
-        config: CODTConfig,
+        config: Case,
         run_dir: str | Path,
         *,
+        namelist: Namelist | None = None,
         experiment_id: str | None = None,
         descriptor: str | None = None,
         execution_context: str | None = None,
@@ -260,11 +261,16 @@ class Registry:
         ----------
         run_id : str
             Unique run identifier (``YYYYMMDD_HHMMSS_model_vX_descriptor``).
-        config : CODTConfig
+        config : Case
             The configuration the inputs were written from.
         run_dir : str or Path
             The run directory containing ``inputs/`` (absolute here; stored
             relative to the experiment's data_root when one is set).
+        namelist : Namelist, optional
+            The namelist actually written into ``inputs/`` — the return value
+            of :meth:`codt_tools.case.Case.write_inputs`. Its path keys name
+            this run's directories, whereas the case's are deliberately empty.
+            Defaults to ``config.params``.
         build_arch : str, optional
             Target CPU microarchitecture of the binary (e.g. ``"zen2"``), as
             detected by :func:`codt_tools.slurm.detect_build_arch`. Recorded
@@ -277,6 +283,9 @@ class Registry:
             The registered ``run_id``.
         """
         run_dir = Path(run_dir).expanduser().resolve()
+        # What was written is what the run reads: prefer the staged namelist
+        # over the case's own, whose path keys are deliberately empty.
+        recorded = namelist if namelist is not None else config.params
         inputs_dir = run_dir / "inputs"
         now = _utcnow()
 
@@ -360,9 +369,9 @@ class Registry:
                 )
             if seed_group_seen is not None:
                 check_seeding_consistency(
-                    bool(config.params.get("do_seeding")), seed_group_seen
+                    bool(recorded.get("do_seeding")), seed_group_seen
                 )
-            for group, params in config.params._groups_for_write().items():
+            for group, params in recorded.groups_for_write().items():
                 for pname, pvalue in params.items():
                     self._conn.execute(
                         "INSERT INTO namelist_parameters (run_id, group_name, "
