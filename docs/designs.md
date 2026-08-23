@@ -275,7 +275,7 @@ The shape of a real campaign — 10 LHS points × 5 seeding modes × 5 paired
 realizations, filtered, with a control group:
 
 ```python
-from codt_tools import Case, CODTRunner
+from codt_tools import Case, Run, write_slurm_array
 from codt_tools.case import cross
 
 base = Case.from_input_dir("~/dev/CODT/input")
@@ -301,13 +301,19 @@ for case in cases:
     case.validate()                                          # fails in seconds,
                                                              # not after a queue wait
 
-runner = CODTRunner(executable, base_dir, account=..., partition=...)
-run_dirs = runner.setup_runs(cases)
+runs = Run.for_cases(cases, executable, base_dir)
+for run in runs:
+    run.stage()
+
+write_slurm_array(runs, base_dir / "array.sh", runs_per_task=64,
+                  account=..., partition=..., time="12:00:00")
+# then, yourself:  sbatch array.sh
 ```
 
 ## See also
 
 - `configure-run-codt` skill — the API reference for `Case`, `Aerosol`, `Parcel`
-  and the runner.
+  and `Run`.
+- `docs/running-on-slurm.md` — turning a staged ensemble into a batch script.
 - `docs/registry-quickstart.md` — recording an ensemble in the registry.
 - `codt_tools/case/mutate.py` — the implementation; it is short.

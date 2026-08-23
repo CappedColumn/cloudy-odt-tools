@@ -272,10 +272,13 @@ class Registry:
             this run's directories, whereas the case's are deliberately empty.
             Defaults to ``config.params``.
         build_arch : str, optional
-            Target CPU microarchitecture of the binary (e.g. ``"zen2"``), as
-            detected by :func:`codt_tools.slurm.detect_build_arch`. Recorded
-            alongside ``code_version``/``git_commit`` so a run's results can
-            be tied to the hardware the binary was tuned for.
+            Target CPU microarchitecture of the binary (e.g. ``"zen2"``).
+            Recorded alongside ``code_version``/``git_commit`` so a run's
+            results can be tied to the hardware the binary was tuned for.
+            Nothing detects this automatically since the arch table was
+            retired with ``codt_tools.slurm`` (recoverable from
+            ``git show v0.8.0:codt_tools/slurm.py``); pass it yourself if
+            you want the column filled.
 
         Returns
         -------

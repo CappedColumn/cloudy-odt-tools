@@ -50,7 +50,7 @@ Build: `./build.sh` (injects version+git hash into `src/version.f90`, then `fpm 
 | `{name}_eddies.bin` | Eddy events (unformatted stream, if enabled) |
 | `{name}_DONE` | Completion marker with timestamp |
 
-Global attrs on NC files: `conventions`, `code_version` (git-describe string from build time, e.g. `v1.0.0` or `v1.0.0-6-g90dabe0-dirty` — **not** bare semver), `git_commit` (short hash, `-dirty` if uncommitted). Namelist params as `PARAMETERS.N`, `MICROPHYSICS.write_trajectories`, etc. Bools as int (0/1). Mode-guarded. `CODTRunner._query_version` and `sim.info()` treat `code_version` as an opaque string (no semver parsing).
+Global attrs on NC files: `conventions`, `code_version` (git-describe string from build time, e.g. `v1.0.0` or `v1.0.0-6-g90dabe0-dirty` — **not** bare semver), `git_commit` (short hash, `-dirty` if uncommitted). Namelist params as `PARAMETERS.N`, `MICROPHYSICS.write_trajectories`, etc. Bools as int (0/1). Mode-guarded. `check_executable` and `sim.info()` treat `code_version` as an opaque string (no semver parsing).
 
 ### Chamber vs. Parcel Mode
 
@@ -149,21 +149,70 @@ codt_tools therefore treats the first three as **staging-owned**:
 
 The invariant that makes bare filenames safe: the model is always invoked with
 an **absolute** namelist path (`runner.run_local`, both sbatch bodies), tested
-in `tests/test_runner.py::TestAbsoluteNamelistPath`.
+in `tests/run/test_run.py::TestExecuteLocal::test_invokes_with_an_absolute_namelist_path`.
 
-## Runner Layout
+## Run Layer (0.9.0)
 
-`CODTRunner.setup_run` creates `{base}/{run_name}/` with `inputs/` (params.nml, aerosol_input.nc) and an `output/` the model writes into. It calls `case.write_inputs(inputs_dir, output_directory=output_dir)`, which **does not modify the case** — one case stages any number of runs. The written namelist's `output_directory` is the absolute `output/` path; `executable` and `base_output_dir` are resolved to absolute in `__init__`, so local runs and generated sbatch scripts are cwd-independent. `aerosol_file` stays relative (`aerosol_input.nc`) and CODT resolves it against the namelist's parent (`inputs/`).
+`codt_tools/run/` replaces `runner.py`. **Nothing in the package submits a
+SLURM job** — no `sbatch`, `squeue` or `sacct` is called from Python. Batch
+execution is *artifact generation*: codt_tools writes a script, you launch it.
 
-`CODTRunner` queries `codt --version` at init and stores the result in `self.codt_version` (None if binary is missing or doesn't support `--version`).
+`Run(case, executable, workdir)` — no account, partition, qos or registry.
 
-### Architecture-aware SLURM submission (v0.8.0)
+| member | does |
+|---|---|
+| `stage()` | `case.write_inputs(workdir/"inputs", output_directory=workdir/"output")`; returns the staged `Namelist`. **Does not modify the case** — one case stages any number of runs. |
+| `execute_local(**kw)` | runs the binary on the **absolute** `inputs/params.nml`, blocking; returns `CompletedProcess`. Warns with a plain-language cause when the binary dies on a signal (SIGILL = built for another CPU). |
+| `open_simulation()` | `CODTSimulation` on `output/`; raises unless `is_complete` |
+| `is_complete` / `is_staged` | the `{case.name}_DONE` marker / the namelist exists |
+| `name`, `inputs_dir`, `output_dir`, `namelist_path`, `done_marker` | derived from `workdir`; `name` is the *directory* name, `done_marker` uses `case.name` (they need not match) |
+| `Run.for_cases(cases, exe, base_dir)` | one run per case at `base_dir/{case.name}`; **raises on duplicate names** |
 
-`codt_tools/slurm.py` reads a binary's target CPU arch off its embedded netCDF RPATH (`detect_build_arch` → `"zen2"`), maps it to SLURM node features via `ARCH_CONSTRAINT` (**the one table to update when CODT adds a build profile**), and introspects `sinfo`/`mychpc batch`. `CODTRunner.__init__` stores `self.build_arch` and auto-resolves `constraint`, `cores_per_node` (minimum core count over matching nodes) and `cluster`; explicit constructor args always win, and everything degrades to no-constraint/40-cores off-cluster. `submit()` preflights the target and **raises** on an executable↔partition mismatch (`force=True` downgrades to a warning) — a zen2 binary on `notchpeak-shared-short` is unschedulable, and unconstrained on `notchpeak-freecycle` it SIGILLs on ~half the nodes.
+`executable` and `workdir` are resolved absolute in `__init__` — that is what
+preserves the Stage 1 invariant that bare staged filenames resolve, since CODT
+takes `argv[1]`'s parent *as typed*. Pinned by
+`tests/run/test_run.py::TestExecuteLocal::test_invokes_with_an_absolute_namelist_path`.
 
-Submission is now **one job array per ensemble**, not one sbatch per batch: `_generate_array_sbatch` writes `{base_output_dir}/slurm/{experiment_id}_{stamp}.sh` plus a `.manifest` (one whitespace-separated line of run dirs per array index) that each task reads via `$SLURM_ARRAY_TASK_ID`. Runs are recorded with `slurm_job_id = "{array}_{task}"`. `cores_per_node` sets a task's *capacity*: the batch count is `ceil(n/cores_per_node)`, then runs are spread evenly across those batches (200 runs at 64 → `[50,50,50,50]`, not `[64,64,64,8]`), so `--ntasks` (sized to the largest batch) never over-reserves. `status()` falls back to `sacct` for job ids missing from `squeue` (a preempted/timed-out run is otherwise indistinguishable from a clean one). New optional constructor/`slurm_options` keys: `qos`, `constraint`, `mem_per_task`, `cluster`, `array_throttle`. **Preemption requeue/restart is out of scope** — CODT has no checkpoint/restart. Full docs: `docs/running-on-slurm.md`.
+`check_executable(exe) -> str | None` gives a one-line reason a binary will not
+run (missing, not executable, missing runtime lib, SIGILL, pre-0.4.0 CODT with
+no `--version`), or None. It judges the binary **on the host it runs on**, so
+it cannot catch an arch mismatch that only appears on a compute node — the
+generated scripts run `"$EXE" --version` in situ for that.
 
-Registry schema **v4** adds `build_arch` on `runs` (recorded at registration; NULL for pre-v4 rows). Group entitlement: notchpeak Rome is **freecycle-only**, `notchpeak-shared-short` has no Rome nodes, granite Genoa needs a zen4 build.
+### Launch scripts (`run/launcher.py`)
+
+`write_local(runs, path, jobs=N)` and `write_slurm_array(runs, path,
+runs_per_task=1, module=None, account=..., partition=..., qos=...,
+constraint=..., time=..., mem=..., array_throttle=..., requeue=True,
+**directives)`. Both take `list[Run]`, return the script path, and **execute
+nothing**. Modeled on the hand-written `Rome_validate.sh`: per-run subshell, a
+`_DONE` skip guard (`compgen -G "$RUN_DIR/output/*_DONE"`), `wait`, and a
+timing line per run (`run, wall seconds, exit code` → `timing.txt`).
+
+- The `_DONE` guard makes both scripts **idempotent** — re-running resumes.
+  That is what makes `--requeue` safe, so the two ship together by default.
+  Preemption is only handled at *run* granularity; CODT still has no
+  checkpoint/restart, so an interrupted individual run restarts.
+- `write_slurm_array` also writes `{stem}_runs.txt`, one whitespace-separated
+  line of run dirs per array task, read via `$SLURM_ARRAY_TASK_ID`.
+- Omitted `account`/`partition`/`time` render as `<ACCOUNT>`/`<PARTITION>`/
+  `<TIME>` placeholders — inert in shell, refused by SLURM until filled.
+- Both **raise** if the batch mixes executables (a script names one `$EXE`)
+  or is empty.
+- Two tests enforce the no-submission rule: `launcher.py` may not import
+  `subprocess`/`os`/`Popen`, and generating both scripts with `subprocess.run`
+  monkeypatched to raise must succeed.
+
+Retired with `codt_tools/slurm.py` in 0.9.0: `submit()`, `status()`, the arch
+preflight, `detect_build_arch`, `ARCH_CONSTRAINT`, the `sinfo`/`mychpc`
+introspection and the even-batch packing math. That knowledge is now prose in
+`docs/running-on-slurm.md` (arch table, krueger entitlement, task sizing,
+`readelf` recipe). Recover the code with `git show v0.8.0:codt_tools/slurm.py`.
+
+Registry schema **v4**'s `build_arch` column stays, but **nothing fills it in
+automatically** — pass `build_arch=` to `register_run` yourself. `Run` has no
+registry coupling at all and generated scripts contain no `codt-registry`
+text; recording is an explicit call (Stage 5 replaces the registry).
 
 `Case.validate()` (`case/validate.py`) mirrors the Fortran-side checks: range validation (N, tmax, H, pres, volume_scaling, Tref, simulation_mode) raises `ValueError`; cross-namelist inconsistencies (do_radiation without do_microphysics, write_eddies without do_turbulence, do_entrainment in chamber mode) issue `warnings.warn`.
 
@@ -177,7 +226,7 @@ Registry schema **v4** adds `build_arch` on `runs` (recorded at registration; NU
 - `radiation_method` must be `'1d'` or `'3d'` (not `'two_stream'`)
 - `do_seeding, seed_hydration, seed_growth_time` → `&MICROPHYSICS` (not a `&SEEDING` group — there isn't one)
 
-`{name}_DONE` discovery: `collect()` (runner.py) and `CODTSimulation._discover_files` both correctly use `{name}_DONE`.
+`{name}_DONE` discovery: `Run.done_marker` and `CODTSimulation._discover_files` both correctly use `{name}_DONE`; the generated launch scripts glob `*_DONE` instead, since bash does not know `simulation_name`.
 
 ## Binary File Readers
 
@@ -233,6 +282,12 @@ dt_record = np.dtype([('id_keep','<i4'),('id_kill','<i4'),('r_keep','<f8'),('r_k
 
 ## Merged
 
+- **Run layer** (codt_tools 0.9.0.dev0, Stage 3 of the `docs/refactor-plan.md`
+  refactor): `runner.py` + `slurm.py` → `codt_tools/run/`, `CODTRunner` →
+  `Run` + `write_local`/`write_slurm_array`. **All SLURM submission removed**
+  — the package generates a script and you launch it. No registry coupling.
+  `docs/running-on-slurm.md` rewritten as prose guidance. Breaking, no aliases.
+  See "Run Layer (0.9.0)" above.
 - **Case layer** (codt_tools 0.9.0.dev0, Stage 1 of the `docs/refactor-plan.md`
   refactor): `config.py` → `codt_tools/case/`, `CODTConfig`/`InjectionData`/
   `ParcelInput` → `Case`/`Aerosol`/`Parcel`, `experiment.py` deleted, and file

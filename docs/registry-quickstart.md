@@ -66,15 +66,18 @@ slurm_options:
   # constraint:     omit -> resolved from the executable's build arch
 ```
 
-Node targeting is automatic: the runner detects the executable's build
-architecture, constrains the job to nodes that can run it, and packs to
-their real core count. See `docs/running-on-slurm.md`.
+Node targeting is **not** automatic. Pick the constraint deliberately — see
+`docs/running-on-slurm.md` for the architecture table and the krueger group's
+entitlements.
 
 ## 2. Create the runs
 
 ```python
-from codt_tools import Case, CODTRunner
+from codt_tools import Case, Run, check_executable
 from codt_tools.registry import Registry
+
+EXE = "~/dev/CODT/codt"
+assert check_executable(EXE) is None, check_executable(EXE)
 
 base = Case()
 base.set(simulation_name="EXP001", tmax=3600.0)
@@ -83,18 +86,21 @@ cases = base.sweep({"params.tref": [18.0, 21.0, 24.0]})
 with Registry("~/codt_registry.db") as reg:
     reg.create_experiment("EXP001_tref_sensitivity", "Tref sensitivity",
                           data_root="/path/to/data")
-    runner = CODTRunner("~/dev/CODT/codt",
-                        "/path/to/data/EXP001_tref_sensitivity/runs",
-                        account=..., partition=...,
-                        registry=reg, experiment_id="EXP001_tref_sensitivity")
-    run_dirs = runner.setup_runs(cases)
+
+    runs = Run.for_cases(
+        cases, EXE, "/path/to/data/EXP001_tref_sensitivity/runs"
+    )
+    for run in runs:
+        staged = run.stage()
+        reg.register_run(run.name, run.case, run.workdir, namelist=staged,
+                         experiment_id="EXP001_tref_sensitivity",
+                         executable_path=EXE)
 ```
 
 > The YAML spec layer (`ExperimentSpec` / `create_experiment_runs`) was removed
 > in codt_tools 0.9.0; the YAML above is still a fine way to *record* a design,
-> but nothing reads it. Shared-input dedup went with it. Check the executable
-> yourself before submitting: `runner.codt_version` must report a real version
-> (a binary not built through `./build.sh` produces untraceable runs).
+> but nothing reads it. Shared-input dedup went with it, and in 0.9.0 the
+> `slurm_options` block is documentation only — nothing submits for you.
 
 This creates:
 
@@ -106,35 +112,39 @@ This creates:
 
 Each run is registered with all
 namelist parameters, input-file checksums, the executable's SHA256
-(archived content-addressed), `codt --version` output, and the binary's
-target CPU architecture (`build_arch`).
-
-`submit()` refuses a target whose nodes cannot run the executable — an
-architecture-tuned binary aimed at a partition without matching hardware
-raises rather than producing jobs that hang unschedulable or die with
-SIGILL. Pass `force=True` to override.
+(archived content-addressed) and `codt --version` output. The `build_arch`
+column exists but nothing fills it in automatically — pass `build_arch=`
+yourself if you want it (`docs/running-on-slurm.md` has the `readelf`
+recipe).
 
 ## 3. Run
 
 ```python
-# SLURM: the whole ensemble goes as ONE job array, packed cores_per_node
-# runs per array task.
-job_ids = runner.submit(run_dirs, walltime="12:00:00")   # -> ['4812345']
+from codt_tools import write_slurm_array
+
+# SLURM: generate the array script, then submit it yourself.
+script = write_slurm_array(runs, base_dir / "array.sh", runs_per_task=64,
+                           account=..., partition=..., time="12:00:00")
+#   sbatch <script>
 
 # Or locally, one at a time (blocking):
-proc = runner.run_local(cases[0])
+runs[0].execute_local()
 ```
 
-On submission the experiment flips to `running`. Inside the job each
-run reports `running → completed/failed` (with its array task ID,
-`{array_job_id}_{task_index}`), and
-on success its output metadata (`conventions`, `code_version`,
-`git_commit`) is captured immediately — no separate `collect` step is
-required for bookkeeping. Every transition is appended to
-`status_events` with timestamp and hostname; failures record a
-`detail` pointing at the run's `.log` and the batch job's
-`CODT_batch_{i}_{jobid}.out` (both under the experiment tree /
-`base_output_dir`).
+Status is **not** reported from inside the job — generated scripts contain no
+registry calls. Record transitions yourself around a local run, or reconcile
+after a batch from the `_DONE` markers:
+
+```python
+for run in runs:
+    if run.is_complete:
+        reg.update_status(run.name, "completed", exit_code=0)
+        reg.record_completion(run.name, run.output_dir / f"{run.case.name}.nc")
+```
+
+`record_completion` captures the output's `conventions`, `code_version` and
+`git_commit`. Every transition is appended to `status_events` with timestamp
+and hostname.
 
 ## 4. Query
 
@@ -210,11 +220,11 @@ point with a specific fix:
 
 | Failure | Where it surfaces | What to change |
 |---|---|---|
-| Executable missing | `CODTRunner.run_local` raises `FileNotFoundError` | The `executable` argument |
-| Improper build (no version info) | `runner.codt_version` is None — check it before submitting | Rebuild with `./build.sh`, pass the new binary |
+| Executable missing / not executable / wrong CPU | `check_executable(exe)` returns a one-line reason; `Run.execute_local` raises | The `executable` argument; see `docs/running-on-slurm.md` |
+| Improper build (no version info) | `check_executable` reports the `--version` failure | Rebuild with `./build.sh`, pass the new binary |
 | Duplicate `experiment_id` | `Registry.create_experiment` raises `IntegrityError` | Pick a new `experiment_id` in the YAML |
 | Invalid namelist values | `case.validate()` / CODT rejects at startup (stderr + run `failed`) | `base_parameters` / `parameter_sweep` in the YAML |
-| sbatch rejected (bad account/partition) | `runner.submit` raises `CalledProcessError` | `slurm_options` in the YAML |
+| sbatch rejected (bad account/partition) | `sbatch` says so when *you* submit the generated script | The directives passed to `write_slurm_array` |
 | Run crashes / exits nonzero | Run marked `failed` with exit code; `detail` names the run's `.log` and the batch `*.out` file | Diagnose from those logs (see `codt-registry show <run_id>`) |
 | Job killed (walltime, OOM, node death) | Run stuck in `running`; SLURM job gone | Cross-check `sacct`, backfill status from the `_DONE` marker; raise `walltime` in the YAML and resubmit |
 | Botched copy at relocation | `codt-registry relocate` refuses (missing files / checksum mismatch); registry untouched | Re-run the `rsync`, then relocate again |
