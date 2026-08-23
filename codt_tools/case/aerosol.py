@@ -19,6 +19,9 @@ A type is seed material *iff* ``seed_bin_type`` references it — there is no
 ``is_seed`` flag, so a chemically identical seed needs a **duplicate**
 composition row.
 
+``Aerosol`` is the in-memory form; the three functions below are the file
+format itself, kept public because they are the format's only specification.
+
 Functions
 ---------
 read_aerosol
@@ -470,3 +473,368 @@ def write_aerosol(path: Union[str, Path], data: dict[str, Any]) -> None:
             v = ds.createVariable("seed_concentration", "f8", ("seed_event",))
             v.units = "cm-3"
             v[:] = seed["seed_concentration"]
+
+
+# ======================================================================
+# Aerosol
+# ======================================================================
+
+
+class Aerosol:
+    """In-memory representation of a CODT aerosol injection specification.
+
+    Reads and writes the ``aerosol_input.nc`` NetCDF4 format
+    (``CODT_aerosol_input_v1`` schema).
+
+    Parameters
+    ----------
+    path : str or Path, optional
+        Path to an existing ``aerosol_input.nc`` file. If ``None``, creates
+        an instance with default NaCl values.
+
+    Examples
+    --------
+    Load from file:
+
+    >>> inj = Aerosol("input/aerosol_input.nc")
+    >>> inj.aerosol_name
+    'NaCl'
+
+    Create from defaults and customise — scalars are wrapped automatically:
+
+    >>> inj = Aerosol()
+    >>> inj.set(aerosol_name="KCl", n_ions=2,
+    ...         molar_mass=0.07455, solute_density=1984.0)
+    >>> inj.set(injection_rate=5.5e5,
+    ...         edge_radii=[60.0, 70.0, 4930.0],
+    ...         cumulative_frequency=[1.0, 1.0])
+    >>> inj.write("run_dir/aerosol_input.nc")
+    """
+
+    def __init__(self, path: Union[str, Path, None] = None) -> None:
+        if path is None:
+            self._init_defaults()
+        else:
+            self._read(Path(path))
+
+    def _init_defaults(self) -> None:
+        """Populate with default NaCl aerosol values."""
+        self.aerosol_name: str = "NaCl"
+        self.n_ions: np.ndarray = np.array([2], dtype=np.int32)
+        self.molar_mass: np.ndarray = np.array([58.4428e-3])
+        self.solute_density: np.ndarray = np.array([2.163e3])
+        self.edge_radii: np.ndarray = np.array([291.0, 500.0, 1000.0])
+        self.category: np.ndarray = np.array([1, 2], dtype=np.int32)
+        self.bin_type: np.ndarray = np.array([1, 1], dtype=np.int32)
+        self.cumulative_frequency: np.ndarray = np.array([[0.5, 1.0]])
+        self.injection_time: np.ndarray = np.array([0.0])
+        self.injection_rate: np.ndarray = np.array([6.66e4])
+        self.dsd_bin_edges: np.ndarray = np.geomspace(0.049, 60.0, num=201)
+        self._init_seed_defaults()
+
+    def _init_seed_defaults(self) -> None:
+        """Clear the optional seed group."""
+        self.seed_edge_radii: np.ndarray | None = None
+        self.seed_category: np.ndarray | None = None
+        self.seed_bin_type: np.ndarray | None = None
+        self.seed_frequency: np.ndarray | None = None
+        self.seed_coord: np.ndarray | None = None
+        self.seed_concentration: np.ndarray | None = None
+
+    def _read(self, path: Path) -> None:
+        """Read from an aerosol_input.nc file."""
+        data = read_aerosol(path)
+        self.aerosol_name = data["aerosol_name"]
+        self.n_ions = data["n_ions"]
+        self.molar_mass = data["molar_mass"]
+        self.solute_density = data["solute_density"]
+        self.edge_radii = data["edge_radii"]
+        self.category = data["category"]
+        self.bin_type = data["bin_type"]
+        self.cumulative_frequency = data["cumulative_frequency"]
+        self.injection_time = data["injection_time"]
+        self.injection_rate = data["injection_rate"]
+        self.dsd_bin_edges = data["dsd_bin_edges"]
+        for key in SEED_KEYS:
+            setattr(self, key, data[key])
+
+    # ------------------------------------------------------------------
+    # Access / modification
+    # ------------------------------------------------------------------
+
+    # Fields that are 1D arrays in the NetCDF schema.  Scalars passed for
+    # these are wrapped in a length-1 array automatically.
+    _INT_1D_FIELDS: set[str] = {"n_ions", "category", "bin_type"}
+    _FLOAT_1D_FIELDS: set[str] = {
+        "molar_mass", "solute_density", "edge_radii",
+        "injection_time", "injection_rate", "dsd_bin_edges",
+    }
+    # cumulative_frequency is always 2D (time, bin).
+    _FLOAT_2D_FIELDS: set[str] = {"cumulative_frequency"}
+
+    def set(self, **kwargs: Any) -> None:
+        """Set one or more attributes by name.
+
+        Scalars are automatically wrapped into arrays where appropriate.
+        For example, ``n_ions=2`` becomes ``np.array([2])``, and a 1-D
+        ``cumulative_frequency`` is promoted to 2-D (single time step).
+
+        Parameters
+        ----------
+        **kwargs
+            Attribute name-value pairs.
+
+        Raises
+        ------
+        AttributeError
+            If an attribute name does not exist.
+
+        Examples
+        --------
+        >>> inj.set(aerosol_name="KCl", n_ions=2,
+        ...         molar_mass=0.07455, solute_density=1984.0)
+        >>> inj.set(injection_rate=1.0e5)
+        >>> inj.set(cumulative_frequency=[0.3, 0.7, 1.0])  # single time step
+        """
+        for key, value in kwargs.items():
+            if key not in self._field_names():
+                raise AttributeError(
+                    f"'{key}' is not a valid Aerosol attribute. "
+                    f"Valid attributes: {self._field_names()}"
+                )
+            value = self._coerce(key, value)
+            setattr(self, key, value)
+
+    @staticmethod
+    def _coerce(key: str, value: Any) -> Any:
+        """Coerce *value* to the expected type/shape for *key*.
+
+        For ``cumulative_frequency``, if the values look like a PDF
+        (rows sum to ~1 but the last element is not ~1), they are
+        converted to a CDF via ``cumsum``.  A warning is issued if the
+        final CDF values do not equal 1.
+        """
+        if key == "aerosol_name":
+            return str(value)
+
+        if key in Aerosol._INT_1D_FIELDS:
+            return np.atleast_1d(np.asarray(value, dtype=np.int32))
+
+        if key in Aerosol._FLOAT_1D_FIELDS:
+            return np.atleast_1d(np.asarray(value, dtype=np.float64))
+
+        if key in Aerosol._FLOAT_2D_FIELDS:
+            arr = np.atleast_2d(np.asarray(value, dtype=np.float64))
+            arr = Aerosol._validate_cdf(arr)
+            return arr
+
+        return value
+
+    @staticmethod
+    def _validate_cdf(arr: np.ndarray) -> np.ndarray:
+        """Check cumulative_frequency and auto-convert PDF to CDF.
+
+        Parameters
+        ----------
+        arr : np.ndarray
+            Shape (n_times, n_bins). Each row should be a CDF ending at 1.
+
+        Returns
+        -------
+        np.ndarray
+            Validated (and possibly converted) CDF array.
+        """
+        for i, row in enumerate(arr):
+            last = row[-1]
+            row_sum = row.sum()
+
+            if np.isclose(last, 1.0):
+                # Already a valid CDF — check monotonicity
+                if np.any(np.diff(row) < -1e-12):
+                    warnings.warn(
+                        f"cumulative_frequency row {i} is not monotonically "
+                        f"non-decreasing: {row}. Expected a CDF.",
+                        UserWarning,
+                        stacklevel=4,
+                    )
+                continue
+
+            # Last value is not 1 — check if it looks like a PDF
+            if np.isclose(row_sum, 1.0) and np.all(row >= 0):
+                arr[i] = np.cumsum(row)
+                warnings.warn(
+                    f"cumulative_frequency row {i} looks like a PDF "
+                    f"(sums to {row_sum:.6g}). Converted to CDF via cumsum.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+            else:
+                warnings.warn(
+                    f"cumulative_frequency row {i} does not end at 1.0 "
+                    f"(last value = {last:.6g}, sum = {row_sum:.6g}). "
+                    f"Expected a CDF with final value 1.0.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+
+        return arr
+
+    @property
+    def n_types(self) -> int:
+        """Number of aerosol types."""
+        return len(self.n_ions)
+
+    @property
+    def n_bins(self) -> int:
+        """Number of aerosol size bins."""
+        return len(self.category)
+
+    @property
+    def n_edges(self) -> int:
+        """Number of bin edges."""
+        return len(self.edge_radii)
+
+    @property
+    def n_times(self) -> int:
+        """Number of injection time steps."""
+        return len(self.injection_time)
+
+    def _field_names(self) -> list[str]:
+        """Return list of public attribute names."""
+        return [
+            "aerosol_name", "n_ions", "molar_mass", "solute_density",
+            "edge_radii", "category", "bin_type", "cumulative_frequency",
+            "injection_time", "injection_rate", "dsd_bin_edges",
+            *SEED_KEYS,
+        ]
+
+    @property
+    def has_seed_group(self) -> bool:
+        """Whether a seed group is present.
+
+        ``&MICROPHYSICS do_seeding`` is the sole controller: seeding on with no
+        group is fatal, but a group present with seeding off is ignored (CODT
+        warns), so one file can serve both a seeded and an unseeded run.
+        """
+        return self.seed_coord is not None
+
+    def set_seed_group(self, **kwargs: Any) -> None:
+        """Build, validate, and attach a seed group.
+
+        Thin wrapper over :func:`aerosol_io.make_seed_group` that supplies the
+        background's ``n_types``, ``bin_type``, and ``category`` so the
+        cross-population rules are checked. See that function for the
+        arguments and the rules enforced.
+        """
+        kwargs.setdefault("n_types", self.n_types)
+        kwargs.setdefault("bin_type", self.bin_type)
+        kwargs.setdefault("category", self.category)
+        for key, value in make_seed_group(**kwargs).items():
+            setattr(self, key, value)
+
+    def clear_seed_group(self) -> None:
+        """Remove the seed group."""
+        self._init_seed_defaults()
+
+    # ------------------------------------------------------------------
+    # Conversion to/from dict (for aerosol_io)
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to the dict format used by :mod:`aerosol_io`.
+
+        Returns
+        -------
+        dict
+            Keys match those returned by :func:`aerosol_io.read_aerosol`.
+        """
+        return {name: getattr(self, name) for name in self._field_names()}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Aerosol":
+        """Create an instance from a dict (as returned by ``read_aerosol``).
+
+        Parameters
+        ----------
+        data : dict
+            Must contain all keys from :func:`aerosol_io.read_aerosol`.
+        """
+        obj = cls.__new__(cls)
+        obj.aerosol_name = data["aerosol_name"]
+        obj.n_ions = np.atleast_1d(np.asarray(data["n_ions"], dtype=np.int32))
+        obj.molar_mass = np.atleast_1d(np.asarray(data["molar_mass"], dtype=np.float64))
+        obj.solute_density = np.atleast_1d(np.asarray(data["solute_density"], dtype=np.float64))
+        obj.edge_radii = np.asarray(data["edge_radii"], dtype=np.float64)
+        obj.category = np.asarray(data["category"], dtype=np.int32)
+        obj.cumulative_frequency = np.atleast_2d(
+            np.asarray(data["cumulative_frequency"], dtype=np.float64)
+        )
+        obj.injection_time = np.atleast_1d(
+            np.asarray(data["injection_time"], dtype=np.float64)
+        )
+        obj.injection_rate = np.atleast_1d(
+            np.asarray(data["injection_rate"], dtype=np.float64)
+        )
+        obj.dsd_bin_edges = np.asarray(data["dsd_bin_edges"], dtype=np.float64)
+
+        # bin_type is optional; absent means every bin is composition row 1.
+        if data.get("bin_type") is None:
+            obj.bin_type = np.ones(len(obj.category), dtype=np.int32)
+        else:
+            obj.bin_type = np.asarray(data["bin_type"], dtype=np.int32)
+
+        obj._init_seed_defaults()
+        for key in SEED_KEYS:
+            if data.get(key) is not None:
+                dtype = (
+                    np.int32
+                    if key in ("seed_category", "seed_bin_type")
+                    else np.float64
+                )
+                setattr(obj, key, np.asarray(data[key], dtype=dtype))
+        return obj
+
+    # ------------------------------------------------------------------
+    # Display
+    # ------------------------------------------------------------------
+
+    def print(self) -> None:
+        """Pretty-print the injection data."""
+        print(f"Aerosol Name:          {self.aerosol_name}")
+        print(f"N Types:               {self.n_types}")
+        print(f"  N-Ions:              {self.n_ions}")
+        print(f"  Molar Mass (kg/mol): {self.molar_mass}")
+        print(f"  Density (kg/m3):     {self.solute_density}")
+        print(f"N Bin Edges:           {self.n_edges}")
+        print(f"  Edges (nm):          {self.edge_radii}")
+        print(f"  Categories:          {self.category}")
+        print(f"N Injection Times:     {self.n_times}")
+        print(f"  Times (s):           {self.injection_time}")
+        print(f"  Rates (m-3 s-1):     {self.injection_rate}")
+        print(f"DSD Bin Edges:         {len(self.dsd_bin_edges)} edges")
+        print(f"  Range (um):          {self.dsd_bin_edges[0]:.4f} - {self.dsd_bin_edges[-1]:.4f}")
+        print(f"Cumulative Freq:       shape {self.cumulative_frequency.shape}")
+        for i, row in enumerate(self.cumulative_frequency):
+            print(f"  Time {i}: {row}")
+
+    def __repr__(self) -> str:
+        return (
+            f"Aerosol(aerosol='{self.aerosol_name}', "
+            f"n_types={self.n_types}, n_bins={self.n_bins}, "
+            f"n_times={self.n_times})"
+        )
+
+    # ------------------------------------------------------------------
+    # I/O
+    # ------------------------------------------------------------------
+
+    def write(self, path: Union[str, Path]) -> None:
+        """Write the injection data to an aerosol_input.nc file.
+
+        Parameters
+        ----------
+        path : str or Path
+            Destination file path. Parent directories are created if needed.
+        """
+        write_aerosol(path, self.to_dict())
+

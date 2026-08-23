@@ -1,34 +1,18 @@
-"""
-Simulation registry for CODT runs and experiments.
+"""An optional list of the simulations that were run.
 
-SQLite-backed tracking of experiments (hypothesis -> conclusion), runs,
-input files, namelist parameters, and status history. See
-``docs/registry-quickstart.md`` for usage.
+Nothing else in codt_tools imports this. Building a case, staging a run,
+launching a batch and analyzing output all work without it — recording a run
+is a separate, explicit act.
+
+>>> from codt_tools.registry import Registry
+>>> with Registry("~/codt_runs.db") as reg:
+...     reg.add_many(runs, tags="EXP005")
 """
 
-from codt_tools.registry.api import Registry
-from codt_tools.registry.db import SCHEMA_VERSION, connect
-from codt_tools.registry.versions import (
-    SUPPORTED_CONVENTIONS,
-    SUPPORTED_INPUT_CONVENTIONS,
-    IncompatibleConventionsError,
-    check_conventions,
-    check_input_conventions,
-    check_seeding_consistency,
-    inspect_input_file,
-    sha256_file,
-)
+from codt_tools.registry.store import COLUMNS, SCHEMA_SQL, Registry
 
 __all__ = [
+    "COLUMNS",
+    "SCHEMA_SQL",
     "Registry",
-    "SCHEMA_VERSION",
-    "SUPPORTED_CONVENTIONS",
-    "SUPPORTED_INPUT_CONVENTIONS",
-    "IncompatibleConventionsError",
-    "check_conventions",
-    "check_input_conventions",
-    "check_seeding_consistency",
-    "connect",
-    "inspect_input_file",
-    "sha256_file",
 ]

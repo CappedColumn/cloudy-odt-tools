@@ -3,13 +3,24 @@
 Python framework for configuring, running, and analyzing simulations from the
 Cloudy One-Dimensional Turbulence (CODT) model.
 
-## Features
+## The shape of it
 
-- **`CODTConfig`** — Build simulation input files (namelist, aerosol injection, bin data) with parameter sweeps
-- **`CODTRunner`** — Run simulations locally or submit SLURM batch jobs with core pinning
-- **`CODTSimulation`** — Load output, compute diagnostics, and produce publication-quality plots
-- **Multi-simulation comparison** — Overlay time series, profiles, and spectra across parameter sweeps
-- **Simulation registry** — SQLite-backed tracking of experiments and runs (parameters, code versions, status history, data location) with the `codt-registry` CLI
+**A case describes a simulation. A run stages one into a directory and
+executes it. A simulation reads the output. The registry is optional.**
+
+| | |
+|---|---|
+| **`Case`** | The complete input description — namelist, aerosol, parcel trajectory. Expands into an ensemble via a *design*. Knows nothing about where it will be written. |
+| **`Run`** | One case + one binary + one directory. Stages inputs, runs the model locally, opens the output. Knows nothing about SLURM. |
+| **`Simulation`** | Read-only analysis: fields, profiles, averages, budgets, spectra, DSDs, trajectories, plots, and multi-run comparison. Depends on nothing but the output files. |
+| **`Registry`** | An optional list of the runs you have done. One table, seven columns. |
+
+Batch execution is **artifact generation**: codt_tools writes a launch script
+(local or SLURM), and you run it. Nothing here calls `sbatch`.
+
+New to it? Start with
+[docs/starting-a-project.md](docs/starting-a-project.md) — a project is three
+short scripts, and that page has all three.
 
 ## Installation
 
@@ -20,63 +31,68 @@ pip install -e .
 ## Quick Start
 
 ```python
-from codt_tools import CODTConfig, CODTRunner, CODTSimulation
+from codt_tools import Case, Run, Simulation
 
 # Configure
-config = CODTConfig()
-config.set(tmax=3600, tref=21.0, do_microphysics=True)
+case = Case()
+case.set(tmax=3600, tref=21.0, do_microphysics=True)
 
 # Run
-runner = CODTRunner(
-    executable="/path/to/CODT",
-    base_output_dir="/path/to/output",
-    account="my-account",
-    partition="my-partition",
-)
-runner.run_local(config)
+run = Run(case, executable="/path/to/CODT", workdir="/path/to/output/control")
+run.stage()          # writes inputs/, creates output/
+run.execute_local()  # blocking
 
 # Analyze
-sim = CODTSimulation("/path/to/output/default_sim")
+sim = run.open_simulation()
 sim.plot_timeseries("LWC")
 sim.plot_timeheight("T")
 
 # Compare multiple runs
-configs = CODTConfig.sweep(config, tref=[20.0, 21.0, 22.0])
-sims = [CODTSimulation(f"/path/to/output/{c.name}") for c in configs]
-CODTSimulation.compare(sims, "LWC", plot_type="timeseries")
+cases = case.sweep({"params.tref": [20.0, 21.0, 22.0]})   # see docs/designs.md
+sims = [Simulation(f"/path/to/output/{c.name}") for c in cases]
+Simulation.compare(sims, "LWC", plot_type="timeseries")
 ```
 
-## Simulation Registry
+## Recording what you ran
 
-Track every run in a single SQLite database: full namelist parameters,
-executable checksum and `--version`, status history, and where the data
-lives. Experiments are defined declaratively in YAML (base config +
-parameter sweep) and expanded into registered runs:
+An optional list of the simulations that were run: one SQLite file, one
+table, seven columns. Nothing else in codt_tools needs it.
 
 ```python
-from codt_tools import ExperimentSpec, create_experiment_runs
 from codt_tools.registry import Registry
 
-spec = ExperimentSpec.from_yaml("experiment.yaml")
-with Registry("~/codt_registry.db") as reg:
-    runner, run_dirs = create_experiment_runs(spec, reg, "/path/to/CODT")
-    runner.submit(run_dirs, walltime="12:00:00")
+with Registry("~/codt_runs.db") as reg:      # created if absent
+    reg.add_many(runs, tags="EXP005_seeding")
+
+    for row in reg.list(tag="EXP005"):
+        print(row["run_id"], row["code_version"])
 ```
 
 ```bash
-codt-registry list --experiment EXP001 --status failed
-codt-registry export --experiment EXP001 --csv runs.csv
+codt-registry list --tag EXP005
+codt-registry show EXP005_000
 ```
 
-See [docs/registry-quickstart.md](docs/registry-quickstart.md) for the
-full define → create → run → query → conclude workflow,
-[docs/registry-schema.md](docs/registry-schema.md) for the schema, and
-[docs/using-a-shared-registry.md](docs/using-a-shared-registry.md) for
-shared/group databases.
+There is deliberately no status tracking and no experiments table: whether a
+run finished is `run.is_complete` (the `_DONE` marker on disk), and grouping
+is the free-text `tags` column. See
+[docs/registry-quickstart.md](docs/registry-quickstart.md).
+
+## Documentation
+
+| | |
+|---|---|
+| [starting-a-project.md](docs/starting-a-project.md) | the three-script project layout — start here |
+| [designs.md](docs/designs.md) | expressing an ensemble: points, designs, `cross`, and the irregular cases |
+| [running-on-slurm.md](docs/running-on-slurm.md) | generating a batch script, picking a node constraint, preemption |
+| [registry-quickstart.md](docs/registry-quickstart.md) | recording what you ran |
+| [CHANGELOG.md](CHANGELOG.md) | version history — **and facts needed to read archived output** |
+
+Requires a **CODT 3.1.0+** binary.
 
 ## Dependencies
 
-- numpy, xarray, netCDF4, matplotlib, f90nml, pyyaml
+- numpy, xarray, netCDF4, matplotlib, f90nml
 
 ## Testing
 

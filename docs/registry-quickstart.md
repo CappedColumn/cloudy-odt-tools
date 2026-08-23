@@ -1,217 +1,125 @@
-# Registry Quickstart
+# Recording what you ran
 
-The simulation registry tracks CODT experiments and runs in a single
-SQLite file: what was run, with which parameters and code version,
-where the data lives, and what was concluded. This walkthrough covers
-the full lifecycle: **define → create → run → query → validate/move →
-conclude**.
+An optional list of the simulations that were run. One SQLite file, one
+table, seven columns.
 
-## 0. Setup
+Nothing else in codt_tools needs it — building a case, staging a run,
+launching a batch and analyzing output all work without it. Recording a run
+is a separate, explicit act.
 
-Pick a database location and (optionally) export it so the CLI and
-SLURM jobs find it without `--db`:
-
-```bash
-export CODT_REGISTRY_DB=/uufs/chpc.utah.edu/common/home/$USER/codt_registry.db
-codt-registry init
-```
-
-The registry lives on your **home directory or group space, not
-scratch** — it must outlive the run data. WAL mode requires a
-filesystem with POSIX locks (home NFS on CHPC is fine; see
-[using-a-shared-registry.md](using-a-shared-registry.md) for caveats).
-
-## 1. Define an experiment (`experiment.yaml`)
-
-```yaml
-# Unique ID: registry key, directory name, and base simulation name.
-experiment_id: EXP001_tref_sensitivity
-title: LWC sensitivity to base temperature
-hypothesis: >
-  Warmer chamber base temperature increases steady-state LWC.
-
-# Recorded with every run.
-model: codt
-execution_context: notchpeak
-
-# Where the experiment tree is created (runs execute here; scratch is
-# the normal choice):
-#   {data_root}/{experiment_id}/{experiment.yaml, shared_inputs/, runs/}
-data_root: /scratch/general/vast/u1342804/CODT/experiments
-
-# Optional: where the tree should live long-term. Runs go to scratch,
-# and after validation the tree is moved here (see step 5a).
-permanent_data_root: /uufs/chpc.utah.edu/common/home/group-space/CODT/experiments
-
-# Namelist overrides applied to every run (flat param -> value;
-# groups are resolved automatically).
-base_parameters:
-  tmax: 3600.0
-  do_microphysics: true
-
-# Cartesian-product sweep, one run per combination (2 x 2 = 4 runs).
-# Empty/omitted means a single run.
-parameter_sweep:
-  tref: [18.0, 22.0]
-  volume_scaling: [13, 50]
-
-slurm_options:
-  account: krueger
-  partition: notchpeak-freecycle
-  qos: notchpeak-freecycle          # partition != qos on some clusters
-  walltime: "12:00:00"
-  array_throttle: 8                 # cap concurrent array tasks
-  mem_per_task: 2G
-  # cores_per_node: omit -> resolved from the node type (rom -> 64)
-  # constraint:     omit -> resolved from the executable's build arch
-```
-
-Node targeting is automatic: the runner detects the executable's build
-architecture, constrains the job to nodes that can run it, and packs to
-their real core count. See `docs/running-on-slurm.md`.
-
-## 2. Create the runs
+## The whole thing
 
 ```python
-from codt_tools import ExperimentSpec, create_experiment_runs
+from codt_tools import Case, Run
 from codt_tools.registry import Registry
 
-spec = ExperimentSpec.from_yaml("experiment.yaml")
-with Registry("~/codt_registry.db") as reg:
-    runner, run_dirs = create_experiment_runs(spec, reg, "~/dev/CODT/codt")
+runs = Run.for_cases(cases, EXE, "/scratch/general/vast/$USER/EXP005")
+for run in runs:
+    run.stage()
+
+with Registry("~/codt_runs.db") as reg:      # created if it doesn't exist
+    reg.add_many(runs, tags="EXP005_seeding")
 ```
 
-Before anything is written, the executable is gated: it must exist and
-report a valid version (`codt --version`). A binary that was not built
-properly (missing/placeholder version info) is refused with
-instructions to rebuild via `./build.sh` — its runs would be
-untraceable.
-
-This registers the experiment (status `planned`), expands the sweep,
-and creates:
-
-```
-{data_root}/{experiment_id}/
-├── experiment.yaml
-├── shared_inputs/          # inputs identical across runs (content-hash dedup)
-└── runs/{run_id}/
-    ├── inputs/             # params.nml + relative symlinks -> shared_inputs/
-    └── output/             # CODT writes here
-```
-
-Run IDs are `{YYYYMMDD_HHMMSS}_{model}_{descriptor}`, e.g.
-`20260709_101500_codt_Tref18.0_VS13`. Each run is registered with all
-namelist parameters, input-file checksums, the executable's SHA256
-(archived content-addressed), `codt --version` output, and the binary's
-target CPU architecture (`build_arch`).
-
-`submit()` refuses a target whose nodes cannot run the executable — an
-architecture-tuned binary aimed at a partition without matching hardware
-raises rather than producing jobs that hang unschedulable or die with
-SIGILL. Pass `force=True` to override.
-
-## 3. Run
+Later:
 
 ```python
-# SLURM: the whole ensemble goes as ONE job array, packed cores_per_node
-# runs per array task. Walltime defaults to spec.slurm_options["walltime"].
-job_ids = runner.submit(run_dirs)      # -> ['4812345'] (one array job id)
-
-# Or locally, one at a time (blocking):
-proc = runner.run_local(spec.expand()[0])
+with Registry("~/codt_runs.db") as reg:
+    for row in reg.list(tag="EXP005"):
+        print(row["run_id"], row["workdir"], row["code_version"])
 ```
 
-On submission the experiment flips to `running`. Inside the job each
-run reports `running → completed/failed` (with its array task ID,
-`{array_job_id}_{task_index}`), and
-on success its output metadata (`conventions`, `code_version`,
-`git_commit`) is captured immediately — no separate `collect` step is
-required for bookkeeping. Every transition is appended to
-`status_events` with timestamp and hostname; failures record a
-`detail` pointing at the run's `.log` and the batch job's
-`CODT_batch_{i}_{jobid}.out` (both under the experiment tree /
-`base_output_dir`).
-
-## 4. Query
+Or from a shell:
 
 ```bash
-codt-registry list --experiment EXP001_tref_sensitivity
-codt-registry list --status failed --since 2026-07-01
-codt-registry list --param tref --value 18.0
-codt-registry show 20260709_101500_codt_Tref18.0_VS13
-codt-registry export --experiment EXP001_tref_sensitivity --csv runs.csv
+export CODT_REGISTRY_DB=~/codt_runs.db
+codt-registry list --tag EXP005
+codt-registry show EXP005_000
 ```
 
-Or in Python: `reg.query_runs(...)`, `reg.run_parameters(run_id)`,
-`reg.run_events(run_id)`. Analysis starts from the registry, not from
-directory listings:
+## What a row holds
+
+| Column | What it is |
+|---|---|
+| `run_id` | the run's name; defaults to its directory name |
+| `workdir` | absolute path to the run directory |
+| `created_at` | ISO-8601 UTC, when it was added to the list |
+| `executable` | path to the binary |
+| `code_version` | `CODT --version`, captured automatically when you add |
+| `tags` | free text, for grouping |
+| `notes` | free text |
+
+`code_version` is the one thing captured for you, because which CODT produced
+a result is the provenance that cannot be recovered once the binary is
+rebuilt. It is probed once per binary, not once per run.
+
+## What it deliberately does not do
+
+**No status.** There is no queued/running/completed, no event history, no
+exit codes. Whether a run finished is `run.is_complete`, which reads the
+`_DONE` marker that CODT itself writes — the only thing that is ever actually
+true:
 
 ```python
-from codt_tools import CODTSimulation
-
-run = reg.get_run("20260709_101500_codt_Tref18.0_VS13")
-exp = reg.get_experiment(run["experiment_id"])
-sim = CODTSimulation(Path(exp["data_root"]) / run["run_dir"] / "output")
+done = [r.name for r in runs if r.is_complete]
 ```
 
-Loading output emits a warning if the file's `conventions` attribute
-is not supported by your codt_tools version (the *conventions gate* —
-see [using-a-shared-registry.md](using-a-shared-registry.md)).
+**No experiments.** Grouping is the `tags` string, matched as a substring, so
+`list(tag="EXP005")` finds `tags="EXP005_seeding"`. A hypothesis and a
+conclusion belong in a README in the experiment directory, where you will
+actually read them again — not in a database schema.
 
-## 5. Move validated data off scratch
+**No parameters, checksums or archived binaries.** What a run was configured
+to do is in its own `inputs/` directory, staged next to the output, which is
+where it is useful. The registry says a run happened and where to find it.
 
-The normal lifecycle is **run on scratch → validate/QC → move to
-group space**. Once the runs pass quality control (all `_DONE`
-markers present, budgets close, output loads cleanly):
+## The API
+
+```python
+Registry(db_path, create=True)
+    .add(run, *, tags=None, notes=None, run_id=None) -> str
+    .add_many(runs, *, tags=None, notes=None) -> list[str]
+    .add_directory(workdir, *, executable=None, tags=None, notes=None) -> str
+    .list(tag=None, since=None) -> list[dict]      # newest first
+    .get(run_id) -> dict | None
+    .remove(run_id) -> bool
+    len(reg)
+```
+
+`add` is `INSERT OR REPLACE` on `run_id`: re-adding a run updates its row, so
+re-staging an ensemble is not an error. `add_directory` records a directory
+that has no `Run` object — useful for runs someone else produced.
+
+`create=False` refuses to open a path that does not exist, so a typo in a
+shared database path fails instead of silently starting a new, empty list.
+
+## Where to keep it
+
+On home or group space, never on scratch — the list should outlive the data
+it points at. The `--db` flag and `$CODT_REGISTRY_DB` both work; the
+environment variable is the convenient default.
+
+It is a plain SQLite file with one table, so anything can read it:
 
 ```bash
-# 1. Move the WHOLE experiment directory (keeps relative symlinks valid)
-rsync -a /scratch/.../experiments/EXP001_tref_sensitivity \
-    /uufs/.../group-space/CODT/experiments/
-
-# 2. Verify + update the registry (destination defaults to the
-#    permanent_data_root recorded at creation)
-codt-registry relocate EXP001_tref_sensitivity
+sqlite3 ~/codt_runs.db "select run_id, code_version from runs;"
 ```
 
-`relocate` refuses to update the registry unless every run directory
-exists at the new root and the recorded input-file checksums match the
-relocated content — a botched copy can't silently become the recorded
-truth. On success it sets `experiments.data_root` and flips every
-run's `data_status` to `on_group` (override with `--data-status`;
-skip checksums with `--no-verify`). Only then delete the scratch copy.
+```python
+import sqlite3, pandas as pd
+pd.read_sql("select * from runs", sqlite3.connect("codt_runs.db"))
+```
 
-The intended destination is recorded up front as
-`permanent_data_root` in `experiment.yaml`, so this step needs no
-decisions.
+## Registries from codt_tools 0.8.0 and earlier
 
-## 6. Conclude
+Those had six tables, a status lifecycle and an experiments table. **They are
+not migrated and not read by this version.** An old database is untouched and
+stays fully queryable from the pinned `codt08` environment, which has all the
+old query code:
 
 ```bash
-codt-registry experiment conclude EXP001_tref_sensitivity \
-    "LWC increases ~8% per K of Tref over 18-22 C." \
-    --artifact analysis/lwc_vs_tref.png
+conda activate codt08
+codt-registry list --experiment EXP001
 ```
 
-Concluding records the conclusion text, artifact paths, and timestamp,
-and sets the experiment to `concluded`. Once run data is moved or
-purged, update `codt-registry set-data-status <run_id> archived`
-(or `deleted`) — the parameters and conclusion remain as the permanent
-"never rerun this" record.
-
-## When things fail
-
-The workflow is designed so each failure surfaces at a well-defined
-point with a specific fix:
-
-| Failure | Where it surfaces | What to change |
-|---|---|---|
-| Executable missing | `create_experiment_runs` raises `FileNotFoundError` before anything is written | The `executable` argument |
-| Improper build (no version info) | `create_experiment_runs` raises `ValueError` before anything is written | Rebuild with `./build.sh`, pass the new binary |
-| Duplicate `experiment_id` | `create_experiment_runs` raises `IntegrityError` | Pick a new `experiment_id` in the YAML |
-| Invalid namelist values | `cfg.validate()` / CODT rejects at startup (stderr + run `failed`) | `base_parameters` / `parameter_sweep` in the YAML |
-| sbatch rejected (bad account/partition) | `runner.submit` raises `CalledProcessError` | `slurm_options` in the YAML |
-| Run crashes / exits nonzero | Run marked `failed` with exit code; `detail` names the run's `.log` and the batch `*.out` file | Diagnose from those logs (see `codt-registry show <run_id>`) |
-| Job killed (walltime, OOM, node death) | Run stuck in `running`; SLURM job gone | Cross-check `sacct`, backfill status from the `_DONE` marker; raise `walltime` in the YAML and resubmit |
-| Botched copy at relocation | `codt-registry relocate` refuses (missing files / checksum mismatch); registry untouched | Re-run the `rsync`, then relocate again |
-| Output unreadable by tools | `CODTSimulation` warns on the `conventions` gate | Use a codt_tools version matching the run's recorded `conventions` |
+Start a new list for new work.

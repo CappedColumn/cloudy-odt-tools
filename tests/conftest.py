@@ -214,6 +214,22 @@ def sim_dir_no_micro(tmp_path):
 
 
 @pytest.fixture
+def completed_run_dir(tmp_path):
+    """A run directory shaped as if CODT had finished in it.
+
+    ``{tmp_path}/test_sim/output/`` holds the main NC and the DONE marker,
+    which is the layout ``Run`` expects. Returns the run directory (the
+    parent of ``output/``), so a ``Run`` can be pointed straight at it.
+    """
+    workdir = tmp_path / "test_sim"
+    output = workdir / "output"
+    output.mkdir(parents=True)
+    _create_main_nc(output, name="test_sim")
+    (output / "test_sim_DONE").write_text("2026-03-22 12:00:00\n")
+    return workdir
+
+
+@pytest.fixture
 def particles_nc(tmp_path):
     """Standalone particle trajectory file for trajectory_io tests."""
     return _create_particles_nc(tmp_path)

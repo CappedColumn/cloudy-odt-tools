@@ -1,4 +1,4 @@
-"""Tests for parcel_io and ParcelInput (CODT_parcel_input_v3)."""
+"""Tests for parcel_io and Parcel (CODT_parcel_input_v3)."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import netCDF4 as nc
 import numpy as np
 import pytest
 
-from codt_tools.config import CODTConfig, ParcelInput
-from codt_tools.parcel_io import read_parcel, validate_legs, write_parcel
+from codt_tools.case import Case, Parcel
+from codt_tools.case.parcel import read_parcel, validate_legs, write_parcel
 
 
 def _sounding() -> dict[str, list[float]]:
@@ -23,7 +23,7 @@ def _sounding() -> dict[str, list[float]]:
 
 
 def _sounding_kwargs() -> dict[str, list[float]]:
-    """The same sounding, keyed for ParcelInput.set_env_profile."""
+    """The same sounding, keyed for Parcel.set_env_profile."""
     return {
         key.removeprefix("env_"): value for key, value in _sounding().items()
     }
@@ -315,15 +315,15 @@ class TestParcelIO:
 
 
 # ======================================================================
-# ParcelInput class
+# Parcel class
 # ======================================================================
 
 
-class TestParcelInput:
-    """Tests for the ParcelInput class."""
+class TestParcel:
+    """Tests for the Parcel class."""
 
     def test_defaults(self) -> None:
-        pi = ParcelInput()
+        pi = Parcel()
         assert pi.n_legs == 1
         np.testing.assert_allclose(pi.segment_coord, [1000.0])
         np.testing.assert_allclose(pi.velocity, [1.0])
@@ -331,31 +331,31 @@ class TestParcelInput:
         assert not pi.has_entrainment_schedule
 
     def test_set(self) -> None:
-        pi = ParcelInput()
+        pi = Parcel()
         pi.set(segment_coord=[1000.0, 400.0], velocity=[1.0, -0.5])
         assert pi.n_legs == 2
         np.testing.assert_allclose(pi.velocity, [1.0, -0.5])
 
     def test_set_bad_attr_raises(self) -> None:
-        pi = ParcelInput()
+        pi = Parcel()
         with pytest.raises(AttributeError):
             pi.set(nonexistent=42)
 
     def test_time_is_no_longer_an_attribute(self) -> None:
         # v3 dropped the time axis; catch templates carried over from v1/v2.
-        pi = ParcelInput()
+        pi = Parcel()
         with pytest.raises(AttributeError):
             pi.set(time=[0.0, 300.0])
 
     def test_set_env_profile(self) -> None:
-        pi = ParcelInput()
+        pi = Parcel()
         pi.set_env_profile(**_sounding_kwargs())
         assert pi.has_env_profile
         np.testing.assert_allclose(pi.env_height, [0.0, 500.0, 1000.0, 2000.0])
         np.testing.assert_allclose(pi.env_pressure, [1.0e5, 9.5e4, 9.0e4, 8.0e4])
 
     def test_clear_env_profile(self) -> None:
-        pi = ParcelInput()
+        pi = Parcel()
         pi.set_env_profile(**_sounding_kwargs())
         assert pi.has_env_profile
         pi.clear_env_profile()
@@ -363,7 +363,7 @@ class TestParcelInput:
         assert pi.env_height is None
 
     def test_set_entrainment_schedule(self) -> None:
-        pi = ParcelInput()
+        pi = Parcel()
         pi.set(segment_coord=[1000.0, 1500.0], velocity=[1.0, 0.5])
         pi.set_entrainment_schedule(
             ent_rate=[0.5, 2.0], n_blob=[1, 2], psigma=[0.1, 0.2]
@@ -372,7 +372,7 @@ class TestParcelInput:
         np.testing.assert_allclose(pi.ent_rate, [0.5, 2.0])
 
     def test_clear_entrainment_schedule(self) -> None:
-        pi = ParcelInput()
+        pi = Parcel()
         pi.set_entrainment_schedule(
             ent_rate=[0.5], n_blob=[1], psigma=[0.1]
         )
@@ -381,89 +381,89 @@ class TestParcelInput:
         assert pi.n_blob is None
 
     def test_roundtrip_file(self, tmp_path: Path) -> None:
-        pi = ParcelInput()
+        pi = Parcel()
         pi.set(segment_coord=[1000.0, 400.0, 1500.0], velocity=[1.0, -0.5, 1.0])
         pi.write(tmp_path / "parcel_input.nc", initial_level=0.0)
 
-        loaded = ParcelInput(tmp_path / "parcel_input.nc")
+        loaded = Parcel(tmp_path / "parcel_input.nc")
         assert loaded.n_legs == 3
         np.testing.assert_allclose(loaded.velocity, [1.0, -0.5, 1.0])
 
     def test_roundtrip_file_with_sounding(self, tmp_path: Path) -> None:
-        pi = ParcelInput()
+        pi = Parcel()
         pi.set(segment_coord=[1000.0], velocity=[1.0])
         pi.set_env_profile(**_sounding_kwargs())
         pi.write(tmp_path / "parcel_input.nc", initial_level=0.0)
 
-        loaded = ParcelInput(tmp_path / "parcel_input.nc")
+        loaded = Parcel(tmp_path / "parcel_input.nc")
         assert loaded.has_env_profile
         np.testing.assert_allclose(loaded.env_pressure, [1.0e5, 9.5e4, 9.0e4, 8.0e4])
 
     def test_repr(self) -> None:
-        pi = ParcelInput()
+        pi = Parcel()
         assert "v3" in repr(pi)
         assert "n_legs=1" in repr(pi)
 
 
 # ======================================================================
-# CODTConfig parcel integration
+# Case parcel integration
 # ======================================================================
 
 
-class TestCODTConfigParcel:
-    """Tests for parcel support in CODTConfig."""
+class TestCaseParcel:
+    """Tests for parcel support in Case."""
 
     def test_default_has_parcel(self) -> None:
-        cfg = CODTConfig()
-        assert isinstance(cfg.parcel, ParcelInput)
+        cfg = Case()
+        assert isinstance(cfg.parcel, Parcel)
 
     def test_set_parcel(self) -> None:
-        cfg = CODTConfig()
-        cfg.set_parcel(segment_coord=[1000.0, 400.0], velocity=[1.0, -0.5])
+        cfg = Case()
+        cfg.parcel.set(segment_coord=[1000.0, 400.0], velocity=[1.0, -0.5])
         assert cfg.parcel.n_legs == 2
 
     def test_write_parcel_mode(self, tmp_path: Path) -> None:
-        cfg = CODTConfig()
+        cfg = Case()
         cfg.set(simulation_mode="parcel", simulation_name="parcel_test")
-        cfg.set_parcel(segment_coord=[1000.0], velocity=[1.0])
-        cfg.write(tmp_path / "run")
+        cfg.parcel.set(segment_coord=[1000.0], velocity=[1.0])
+        cfg.write_inputs(tmp_path / "run")
 
         assert (tmp_path / "run" / "params.nml").is_file()
         assert (tmp_path / "run" / "aerosol_input.nc").is_file()
         assert (tmp_path / "run" / "parcel_input.nc").is_file()
 
-        from codt_tools.config import Namelist
+        from codt_tools.case import Namelist
         nml = Namelist(tmp_path / "run" / "params.nml")
         assert nml.get("parcel_file") == "parcel_input.nc"
         assert nml.get("vertical_axis") == "height"
         assert nml.get("pressure_mode") == "hydrostatic"
 
     def test_write_chamber_mode_no_parcel_file(self, tmp_path: Path) -> None:
-        cfg = CODTConfig()
+        cfg = Case()
         cfg.set(simulation_mode="chamber", simulation_name="chamber_test")
-        cfg.write(tmp_path / "run")
+        cfg.write_inputs(tmp_path / "run")
 
         assert not (tmp_path / "run" / "parcel_input.nc").is_file()
 
     def test_roundtrip_parcel_mode(self, tmp_path: Path) -> None:
-        cfg = CODTConfig()
+        cfg = Case()
         cfg.set(simulation_mode="parcel", simulation_name="rt_test")
-        cfg.set_parcel(
+        cfg.parcel.set(
             segment_coord=[1000.0, 400.0, 1500.0], velocity=[1.0, -0.5, 1.0]
         )
-        cfg.write(tmp_path / "run")
+        cfg.write_inputs(tmp_path / "run")
 
-        reloaded = CODTConfig(tmp_path / "run" / "params.nml")
+        reloaded = Case.from_input_dir(tmp_path / "run")
         assert reloaded.parcel.n_legs == 3
         np.testing.assert_allclose(reloaded.parcel.velocity, [1.0, -0.5, 1.0])
 
     def test_copy_independence(self) -> None:
-        cfg = CODTConfig()
+        cfg = Case()
         cfg.set(simulation_mode="parcel")
-        cfg.set_parcel(segment_coord=[1000.0, 1500.0], velocity=[1.0, 0.5])
+        cfg.parcel.set(segment_coord=[1000.0, 1500.0], velocity=[1.0, 0.5])
 
         clone = cfg.copy()
-        clone.set_parcel(velocity=[2.0, 1.0])
+        clone.parcel.set(velocity=[2.0, 1.0])
 
         np.testing.assert_allclose(cfg.parcel.velocity, [1.0, 0.5])
         np.testing.assert_allclose(clone.parcel.velocity, [2.0, 1.0])

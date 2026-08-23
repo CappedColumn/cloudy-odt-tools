@@ -1,6 +1,6 @@
 """Plotting functions for CODT simulation data.
 
-These are called by the ``CODTSimulation.plot_*`` methods. They can
+These are called by the ``Simulation.plot_*`` methods. They can
 also be used standalone with raw xarray DataArrays.
 """
 
@@ -40,7 +40,7 @@ def comparison_colors(n: int, cmap: str = "viridis") -> list[str]:
     return [mcolors.to_hex(cm(p)) for p in positions]
 
 
-def _get_label(da: xr.DataArray) -> str:
+def get_label(da: xr.DataArray) -> str:
     """Build an axis label from a DataArray's attributes."""
     long_name = da.attrs.get("long_name", da.attrs.get("long name", da.name or ""))
     units = da.attrs.get("units", "")
@@ -49,7 +49,7 @@ def _get_label(da: xr.DataArray) -> str:
     return long_name
 
 
-def _ensure_ax(ax: matplotlib.axes.Axes | None) -> matplotlib.axes.Axes:
+def ensure_ax(ax: matplotlib.axes.Axes | None) -> matplotlib.axes.Axes:
     """Return the given axes, or create a new figure and axes."""
     if ax is None:
         _, ax = plt.subplots()
@@ -76,14 +76,14 @@ def plot_timeheight(
     -------
     matplotlib.axes.Axes
     """
-    ax = _ensure_ax(ax)
+    ax = ensure_ax(ax)
     kwargs.setdefault("shading", "auto")
     mesh = ax.pcolormesh(
         da.time.values, da.z.values, da.values.T, **kwargs
     )
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Height (m)")
-    ax.set_title(_get_label(da))
+    ax.set_title(get_label(da))
     ax.figure.colorbar(mesh, ax=ax)
     return ax
 
@@ -109,11 +109,11 @@ def plot_profile(
     -------
     matplotlib.axes.Axes
     """
-    ax = _ensure_ax(ax)
+    ax = ensure_ax(ax)
     for da, label in profiles:
         ax.plot(da.values, da.z.values, label=label, **kwargs)
     if profiles:
-        ax.set_xlabel(_get_label(profiles[0][0]))
+        ax.set_xlabel(get_label(profiles[0][0]))
     ax.set_ylabel("Height (m)")
     ax.legend()
     return ax
@@ -139,12 +139,12 @@ def plot_timeseries(
     -------
     matplotlib.axes.Axes
     """
-    ax = _ensure_ax(ax)
+    ax = ensure_ax(ax)
     for da, label in series:
         ax.plot(da.time.values, da.values, label=label, **kwargs)
     ax.set_xlabel("Time (s)")
     if series:
-        ax.set_ylabel(_get_label(series[0][0]))
+        ax.set_ylabel(get_label(series[0][0]))
     if len(series) > 1:
         ax.legend()
     return ax
@@ -162,7 +162,7 @@ def plot_spectrum(
     Parameters
     ----------
     spectra : dict[str, xr.DataArray]
-        Output from ``CODTSimulation.dsd_average``. Keys are variable
+        Output from ``Simulation.dsd_average``. Keys are variable
         names (``"DSD"``, ``"DSD_1"``, etc.).
     radius : np.ndarray
         Bin-center radii in microns (x-axis values).
@@ -178,7 +178,7 @@ def plot_spectrum(
     -------
     matplotlib.axes.Axes
     """
-    ax = _ensure_ax(ax)
+    ax = ensure_ax(ax)
 
     for name, da in spectra.items():
         ax.plot(radius, da.values, label=name, **kwargs)
@@ -234,7 +234,7 @@ def plot_dsd_evolution(
     -------
     matplotlib.axes.Axes
     """
-    ax = _ensure_ax(ax)
+    ax = ensure_ax(ax)
     if cmaps is None:
         cmaps = _DSD_CMAPS
 

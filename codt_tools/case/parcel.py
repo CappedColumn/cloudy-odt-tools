@@ -8,7 +8,10 @@ targets need no monotonic order. Completing the last leg ends the simulation,
 possibly before ``tmax``.
 
 The v1 (time segments) and v2 (time segments + sounding) schemas are rejected by
-CODT and are not readable here; see ``docs/codt_v3_migration.md`` to convert.
+CODT and are not readable here; regenerate them in the v3 waypoint format.
+
+``Parcel`` is the in-memory form; the three functions below are the file format
+itself, kept public because they are the format's only specification.
 
 Functions
 ---------
@@ -222,9 +225,11 @@ def read_parcel(path: Union[str, Path]) -> dict[str, Any]:
             extra = ""
             if conventions in ("CODT_parcel_input_v1", "CODT_parcel_input_v2"):
                 extra = (
-                    " (v1/v2 parcel inputs are no longer supported; regenerate "
-                    "the file in the v3 waypoint format — see "
-                    "docs/codt_v3_migration.md)"
+                    " (v1/v2 parcel inputs are no longer supported. They keyed "
+                    "the lookup by position within a segment; v3 uses waypoint "
+                    "legs keyed by a leg counter, and redefines ent_rate as "
+                    "1/km rather than 1/m — a 1000x change. Rebuild the file "
+                    "with Parcel.set(), or read it with codt_tools 0.4.x.)"
                 )
             raise ValueError(
                 f"Expected conventions='{CONVENTIONS}', "
@@ -383,3 +388,259 @@ def write_parcel(
             v = ds.createVariable("env_RH", "f8", ("level",))
             v.units = "1"
             v[:] = env["env_RH"]
+
+
+# ======================================================================
+# Parcel
+# ======================================================================
+
+
+class Parcel:
+    """In-memory representation of a CODT parcel input file.
+
+    Reads and writes the ``parcel_input.nc`` format
+    (``CODT_parcel_input_v3``). The trajectory is a sequence of **waypoint
+    legs**: leg *i* says "proceed to ``segment_coord[i]`` at ``velocity[i]``".
+    Targets need no monotonic order, velocities are signed, and completing the
+    last leg ends the simulation — possibly before ``tmax``.
+
+    Parameters
+    ----------
+    path : str or Path, optional
+        Path to an existing ``parcel_input.nc`` file. If ``None``, creates
+        an instance with a single leg rising to 1000 m at 1 m/s.
+
+    Examples
+    --------
+    Create from defaults, then fly up, down, and up again:
+
+    >>> pi = Parcel()
+    >>> pi.set(segment_coord=[1000.0, 400.0, 1500.0], velocity=[1.0, -0.5, 1.0])
+
+    Load from file:
+
+    >>> pi = Parcel("input/parcel_input.nc")
+    """
+
+    def __init__(self, path: Union[str, Path, None] = None) -> None:
+        if path is None:
+            self._init_defaults()
+        else:
+            self._read(Path(path))
+
+    def _init_defaults(self) -> None:
+        self.segment_coord: np.ndarray = np.array([1000.0])
+        self.velocity: np.ndarray = np.array([1.0])
+        self.ent_rate: np.ndarray | None = None
+        self.n_blob: np.ndarray | None = None
+        self.psigma: np.ndarray | None = None
+        self.env_height: np.ndarray | None = None
+        self.env_pressure: np.ndarray | None = None
+        self.env_temperature: np.ndarray | None = None
+        self.env_RH: np.ndarray | None = None
+
+    def _read(self, path: Path) -> None:
+        data = read_parcel(path)
+        self.segment_coord = data["segment_coord"]
+        self.velocity = data["velocity"]
+        self.ent_rate = data["ent_rate"]
+        self.n_blob = data["n_blob"]
+        self.psigma = data["psigma"]
+        self.env_height = data["env_height"]
+        self.env_pressure = data["env_pressure"]
+        self.env_temperature = data["env_temperature"]
+        self.env_RH = data["env_RH"]
+
+    # ------------------------------------------------------------------
+    # Access / modification
+    # ------------------------------------------------------------------
+
+    _VALID_ATTRS: set[str] = {
+        "segment_coord", "velocity",
+        "ent_rate", "n_blob", "psigma",
+        "env_height", "env_pressure", "env_temperature", "env_RH",
+    }
+
+    def set(self, **kwargs: Any) -> None:
+        """Set one or more attributes by name.
+
+        Array-like values are converted to numpy arrays. Setting any member of
+        the sounding or the entrainment schedule to ``None`` clears just that
+        value; use :meth:`clear_env_profile` or :meth:`clear_entrainment` to
+        clear a whole group.
+
+        Parameters
+        ----------
+        **kwargs
+            Attribute name-value pairs.
+
+        Raises
+        ------
+        AttributeError
+            If an attribute name is not valid.
+        """
+        for key, value in kwargs.items():
+            if key not in self._VALID_ATTRS:
+                raise AttributeError(
+                    f"'{key}' is not a valid Parcel attribute. "
+                    f"Valid: {sorted(self._VALID_ATTRS)}"
+                )
+            if value is None:
+                setattr(self, key, None)
+            elif key == "n_blob":
+                setattr(self, key,
+                        np.atleast_1d(np.asarray(value, dtype=np.int32)))
+            else:
+                setattr(self, key,
+                        np.atleast_1d(np.asarray(value, dtype=np.float64)))
+
+    @property
+    def n_legs(self) -> int:
+        """Number of waypoint legs."""
+        return len(self.segment_coord)
+
+    @property
+    def has_env_profile(self) -> bool:
+        """Whether an environmental sounding is present."""
+        return self.env_pressure is not None
+
+    @property
+    def has_entrainment_schedule(self) -> bool:
+        """Whether a per-leg entrainment schedule is present."""
+        return self.ent_rate is not None
+
+    def set_env_profile(
+        self,
+        height: np.ndarray | list,
+        pressure: np.ndarray | list,
+        temperature: np.ndarray | list,
+        RH: np.ndarray | list,
+    ) -> None:
+        """Set the environmental sounding.
+
+        Required when ``do_entrainment`` is enabled or
+        ``&PARCEL pressure_mode='environment'``.
+
+        Parameters
+        ----------
+        height : array-like
+            Environmental height in m (strictly increasing).
+        pressure : array-like
+            Environmental pressure in Pa (strictly decreasing).
+        temperature : array-like
+            Environmental temperature in K.
+        RH : array-like
+            Environmental relative humidity (0–1).
+        """
+        self.env_height = np.asarray(height, dtype=np.float64)
+        self.env_pressure = np.asarray(pressure, dtype=np.float64)
+        self.env_temperature = np.asarray(temperature, dtype=np.float64)
+        self.env_RH = np.asarray(RH, dtype=np.float64)
+
+    def clear_env_profile(self) -> None:
+        """Remove the environmental sounding."""
+        self.env_height = None
+        self.env_pressure = None
+        self.env_temperature = None
+        self.env_RH = None
+
+    def set_entrainment_schedule(
+        self,
+        ent_rate: np.ndarray | list,
+        n_blob: np.ndarray | list,
+        psigma: np.ndarray | list,
+    ) -> None:
+        """Set a per-leg entrainment schedule.
+
+        When present these override the constant ``&ENTRAINMENT`` values
+        leg-by-leg; ``random_entrainment`` still comes from the namelist.
+
+        Parameters
+        ----------
+        ent_rate : array-like
+            Fractional entrainment rate per leg, in **1/km** (not 1/m).
+        n_blob : array-like
+            Number of evenly sized chunks the replaced volume is split into,
+            per leg (1–10). Purely a mixing axis — it does not change how much
+            is entrained, nor the event spacing.
+        psigma : array-like
+            Total domain fraction replaced per entrainment event, per leg, in
+            (0, 1). Each chunk needs at least one gridcell, so
+            ``int(psigma * N) >= n_blob``.
+
+        Notes
+        -----
+        This is the CODT >= 3.1.0 meaning of ``psigma``. Through CODT 3.0.1 it
+        was the size of *one* blob, so an event replaced ``n_blob * psigma`` of
+        the domain; schedules carried over from that era entrain ``n_blob``
+        times less now.
+        """
+        self.ent_rate = np.asarray(ent_rate, dtype=np.float64)
+        self.n_blob = np.asarray(n_blob, dtype=np.int32)
+        self.psigma = np.asarray(psigma, dtype=np.float64)
+
+    def clear_entrainment_schedule(self) -> None:
+        """Remove the per-leg entrainment schedule."""
+        self.ent_rate = None
+        self.n_blob = None
+        self.psigma = None
+
+    # ------------------------------------------------------------------
+    # I/O
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to the dict format used by :mod:`parcel_io`."""
+        return {key: getattr(self, key) for key in self._VALID_ATTRS}
+
+    def write(
+        self,
+        path: Union[str, Path],
+        initial_level: float | None = None,
+        vertical_axis: str = "height",
+        n_grid: int | None = None,
+    ) -> None:
+        """Write the parcel input to a NetCDF file.
+
+        Parameters
+        ----------
+        path : str or Path
+            Destination file path. Parent directories are created if needed.
+        initial_level : float, optional
+            Launch level to validate leg directions against. If None,
+            validation is left to CODT at run time.
+        vertical_axis : {"height", "pressure"}
+            Axis that ``segment_coord`` is expressed on.
+        n_grid : int, optional
+            Grid size ``N``, used to check the entrainment schedule's
+            ``int(psigma * N) >= n_blob`` rule. If None that check is left to
+            CODT at run time.
+        """
+        write_parcel(
+            path, self.to_dict(), initial_level, vertical_axis, n_grid
+        )
+
+    # ------------------------------------------------------------------
+    # Display
+    # ------------------------------------------------------------------
+
+    def print(self) -> None:
+        """Pretty-print the parcel input data."""
+        print(f"N Legs:        {self.n_legs}")
+        print(f"  Targets:     {self.segment_coord}")
+        print(f"  Vel (m/s):   {self.velocity}")
+        if self.has_entrainment_schedule:
+            print(f"Entrainment:   per-leg schedule")
+            print(f"  Rate (1/km): {self.ent_rate}")
+        else:
+            print("Entrainment:   none (namelist constants)")
+        if self.env_pressure is not None:
+            print(f"Env Profile:   {len(self.env_pressure)} levels")
+            print(f"  P range:     {self.env_pressure[0]:.0f} - "
+                  f"{self.env_pressure[-1]:.0f} Pa")
+        else:
+            print("Env Profile:   none")
+
+    def __repr__(self) -> str:
+        return f"Parcel(n_legs={self.n_legs}, schema=v3)"
+
