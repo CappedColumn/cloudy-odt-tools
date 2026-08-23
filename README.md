@@ -42,43 +42,30 @@ sims = [Simulation(f"/path/to/output/{c.name}") for c in cases]
 Simulation.compare(sims, "LWC", plot_type="timeseries")
 ```
 
-## Simulation Registry
+## Recording what you ran
 
-Track every run in a single SQLite database: full namelist parameters,
-executable checksum and `--version`, status history, and where the data
-lives. Registration is an explicit call, so what gets recorded is up to you:
+An optional list of the simulations that were run: one SQLite file, one
+table, seven columns. Nothing else in codt_tools needs it.
 
 ```python
 from codt_tools.registry import Registry
-from codt_tools import Run, write_slurm_array
 
-with Registry("~/codt_registry.db") as reg:
-    reg.create_experiment("EXP001", "Title", data_root="/path/to/data")
+with Registry("~/codt_runs.db") as reg:      # created if absent
+    reg.add_many(runs, tags="EXP005_seeding")
 
-    runs = Run.for_cases(cases, "/path/to/CODT", "/path/to/data/EXP001/runs")
-    for run in runs:
-        staged = run.stage()
-        reg.register_run(run.name, run.case, run.workdir,
-                         namelist=staged, experiment_id="EXP001")
-
-    write_slurm_array(runs, "/path/to/data/EXP001/array.sh",
-                      runs_per_task=64, account="my-account",
-                      partition="my-partition", time="12:00:00")
-    # then, yourself:  sbatch /path/to/data/EXP001/array.sh
+    for row in reg.list(tag="EXP005"):
+        print(row["run_id"], row["code_version"])
 ```
 
 ```bash
-codt-registry list --experiment EXP001 --status failed
-codt-registry export --experiment EXP001 --csv runs.csv
+codt-registry list --tag EXP005
+codt-registry show EXP005_000
 ```
 
-See [docs/designs.md](docs/designs.md) for describing an ensemble —
-including conditional, ragged and sampled designs —
-[docs/registry-quickstart.md](docs/registry-quickstart.md) for the
-full define → create → run → query → conclude workflow,
-[docs/registry-schema.md](docs/registry-schema.md) for the schema, and
-[docs/using-a-shared-registry.md](docs/using-a-shared-registry.md) for
-shared/group databases.
+There is deliberately no status tracking and no experiments table: whether a
+run finished is `run.is_complete` (the `_DONE` marker on disk), and grouping
+is the free-text `tags` column. See
+[docs/registry-quickstart.md](docs/registry-quickstart.md).
 
 ## Dependencies
 

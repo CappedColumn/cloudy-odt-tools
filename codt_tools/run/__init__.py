@@ -11,11 +11,12 @@ your account, your partition, or which cluster you are on.
 """
 
 from codt_tools.run.launcher import write_local, write_slurm_array
-from codt_tools.run.run import Run, check_executable
+from codt_tools.run.run import Run, check_executable, codt_version
 
 __all__ = [
     "Run",
     "check_executable",
+    "codt_version",
     "write_local",
     "write_slurm_array",
 ]

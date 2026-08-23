@@ -374,6 +374,48 @@ def check_executable(executable: Union[str, Path]) -> str | None:
     return None
 
 
+def codt_version(executable: Union[str, Path]) -> str | None:
+    """The binary's version string, or None if it cannot be asked.
+
+    The companion to :func:`check_executable`, which reports why a binary
+    will *not* run. This reports what it *is*: the output of
+    ``CODT --version``, e.g. ``"CODT v3.1.0 (ee8f004)"``.
+
+    Parameters
+    ----------
+    executable : str or Path
+        Path to the CODT binary.
+
+    Returns
+    -------
+    str or None
+        The trimmed ``--version`` output, or None for any binary that
+        cannot be run or does not answer (CODT gained ``--version`` in
+        0.4.0). Never raises.
+
+    Examples
+    --------
+    >>> codt_version("~/bin/CODT")
+    'CODT v3.1.0 (ee8f004)'
+    """
+    path = Path(executable).expanduser().resolve()
+    if not path.is_file() or not os.access(path, os.X_OK):
+        return None
+    try:
+        proc = subprocess.run(
+            [str(path), "--version"],
+            capture_output=True,
+            text=True,
+            timeout=PROBE_TIMEOUT_S,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
 def _signal_problem(signum: int) -> str:
     """Explain a fatal signal in the terms that matter for a CODT binary."""
     if signum == signal.SIGILL:

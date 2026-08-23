@@ -73,9 +73,57 @@ Global attrs on NC files: `conventions`, `code_version` (git-describe string fro
 | **`pressure_limit`** | Not used | Stop simulation at target pressure (Pa) |
 | **Seeding** | Events keyed to **time** [s] | Events keyed to the **vertical coordinate** (m or Pa per `vertical_axis`). Same driver, same `seed_coord` variable — only the axis differs |
 
-## Simulation Registry
+## Simulation Registry (rewritten in 0.9.0)
 
-`codt_tools/registry/` tracks experiments and runs in SQLite (docs in `docs/registry-*.md`). DB location convention: `--db` or `$CODT_REGISTRY_DB`; the DB lives on home/group space, never scratch. All access goes through `Registry` / the `codt-registry` CLI (pragmas, retry, txn coupling live in Python — never raw sqlite3 writes). Gate rule **changed in 0.9.0 (Stage 4): each reader owns the format string it reads** — see "Conventions" below. The registry keeps its own `SUPPORTED_CONVENTIONS` / `SUPPORTED_INPUT_CONVENTIONS` in `registry/versions.py` for `record_completion` and `register_run` (which records each NetCDF input's conventions plus the aerosol seed-group flag and cross-checks `do_seeding`); that copy goes away with `api.py` in Stage 5. `register_run` takes an optional `namelist=` (the staged `Namelist` returned by `Case.write_inputs`) and records *that* — what the run actually reads — rather than the case's own neutral paths. The YAML experiment layer (`experiment.py`, `ExperimentSpec`, `create_experiment_runs`) was **deleted in 0.9.0**; it had no callers. Experiments still exist as registry rows, created through `Registry.create_experiment` / the CLI.
+`codt_tools/registry/` is **a list of the simulations that were run** — one
+SQLite file, one `runs` table, seven columns (`run_id`, `workdir`,
+`created_at`, `executable`, `code_version`, `tags`, `notes`). Docs:
+`docs/registry-quickstart.md`. DB location convention unchanged: `--db` or
+`$CODT_REGISTRY_DB`, on home/group space, never scratch.
+
+```python
+with Registry("~/codt_runs.db") as reg:      # created if absent
+    reg.add_many(runs, tags="EXP005")
+    reg.list(tag="EXP005")
+```
+
+`Registry` (`registry/store.py`): `add(run)`, `add_many(runs)`,
+`add_directory(workdir)`, `list(tag=, since=)`, `get(run_id)`,
+`remove(run_id)`, `len()`. `add` takes a **`Run`** and reads name/workdir/
+executable off it; it is `INSERT OR REPLACE`, so re-staging an ensemble is not
+an error. `code_version` is captured automatically via
+`codt_tools.run.codt_version()` and cached **once per executable**, not per
+run. `list()` returns plain `list[dict]`, newest first.
+
+CLI: `codt-registry list [--tag] [--since] | show <id> | add <dir> | remove <id>`.
+No `init` — opening creates.
+
+**Deliberately absent, and not to be re-added without asking:**
+
+- **No status of any kind.** No lifecycle, no `status_events`, no exit codes.
+  "Did it finish?" is `run.is_complete` (the `_DONE` marker), the only thing
+  ever actually true. Generated launch scripts contain no registry calls
+  (Stage 3), so nothing *could* report from inside a job.
+- **No experiments table.** Grouping is the free-text `tags` column, matched
+  as a substring. Hypothesis/conclusion belong in a README in the experiment
+  directory.
+- **No namelist parameters, input checksums or executable archiving.** A run's
+  configuration lives in its own staged `inputs/`.
+- **No migrations.** `PRAGMA user_version=1` is stamped at creation and never
+  read.
+
+**Nothing in the package imports the registry** — pinned by
+`tests/registry/test_store.py::TestOptional`, which checks in a fresh
+interpreter that importing `codt_tools`, `codt_tools.run` and
+`codt_tools.simulation` leaves `sys.modules` free of `codt_tools.registry`.
+
+Deleted in 0.9.0: `registry/api.py` (720 lines), `registry/db.py` (6 tables,
+4 migrations), `registry/versions.py`, `docs/registry-schema.md`,
+`docs/using-a-shared-registry.md`. **Deleting `versions.py` resolved the Stage
+4 duplication** — `"CODT_output_v1"` now exists in exactly one place,
+`simulation/simulation.py`, so "each reader owns its format string" is
+literally true. Pre-0.9.0 databases are **not migrated and not read**; they
+stay queryable from the pinned `codt08` environment.
 
 ## Case Layer (0.9.0)
 
@@ -257,10 +305,9 @@ The asymmetry is the point: output already exists and a scientist must be able
 to look at it, so a mismatch is a warning naming expected vs found. A
 wrong-format *input* silently produces a wrong simulation, so that raises.
 
-`registry/versions.py` still holds its own `SUPPORTED_CONVENTIONS` /
-`SUPPORTED_INPUT_CONVENTIONS` / `RETIRED_INPUT_CONVENTIONS` for `api.py`'s
-registration-time checks — the only remaining caller — leaving
-`"CODT_output_v1"` written in two places until Stage 5 deletes `api.py`.
+**Resolved in Stage 5:** `registry/versions.py` was deleted with `api.py`, so
+`"CODT_output_v1"` now exists in exactly one place and the rule above is
+literally true — there is no "supported conventions" set anywhere.
 
 ### Namelist group placement (must match what CODT reads)
 
@@ -328,6 +375,12 @@ dt_record = np.dtype([('id_keep','<i4'),('id_kill','<i4'),('r_keep','<f8'),('r_k
 
 ## Merged
 
+- **Minimal registry** (codt_tools 0.9.0.dev0, Stage 5 of the
+  `docs/refactor-plan.md` refactor): `registry/api.py` + `db.py` +
+  `versions.py` → one `registry/store.py` with a single seven-column table.
+  No status, no experiments, no parameters, no migrations. Old databases are
+  neither migrated nor read. This also removed the last copy of
+  `SUPPORTED_CONVENTIONS`. See "Simulation Registry (rewritten in 0.9.0)".
 - **Simulation layer** (codt_tools 0.9.0.dev0, Stage 4 of the
   `docs/refactor-plan.md` refactor): `simulation.py` + `plotting.py` +
   `trajectory_io.py` → `codt_tools/simulation/`, `CODTSimulation` →
@@ -533,7 +586,7 @@ a CODT 2.0.0 binary.
   `ent_rate`) must be detected by *variable presence*. Aerosol stayed v1, so
   seeding must be detected by *seed-group presence* (probe the `seed_bin`
   dimension, as CODT's own `read_seed_group` does). The registry records both
-  facts per run — see `docs/registry-schema.md`.
+  facts per run (registry schema v3; all of this was removed in 0.9.0).
 - **`do_seeding` is the sole controller of seeding — the gate is one-way.**
   `do_seeding=.true.` with no seed group aborts the run (fatal). But
   `do_seeding=.false.` with a seed group present is **fine**: CODT never reads
