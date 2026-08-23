@@ -75,7 +75,7 @@ Global attrs on NC files: `conventions`, `code_version` (git-describe string fro
 
 ## Simulation Registry
 
-`codt_tools/registry/` tracks experiments and runs in SQLite (docs in `docs/registry-*.md`). DB location convention: `--db` or `$CODT_REGISTRY_DB`; the DB lives on home/group space, never scratch. All access goes through `Registry` / the `codt-registry` CLI (pragmas, retry, txn coupling live in Python — never raw sqlite3 writes). Gate rule: `SUPPORTED_CONVENTIONS` (registry/versions.py) is the single source of truth for readable output conventions; `CODTSimulation.__init__` and `record_completion` warn on mismatch (`strict=True` raises). `SUPPORTED_INPUT_CONVENTIONS` is the input-side equivalent (parcel v3 only, aerosol v1) — `register_run` records each NetCDF input's conventions plus the aerosol seed-group flag, and cross-checks `do_seeding`. Bump both via the codt-versioning skill when formats change. `register_run` takes an optional `namelist=` (the staged `Namelist` returned by `Case.write_inputs`) and records *that* — what the run actually reads — rather than the case's own neutral paths. The YAML experiment layer (`experiment.py`, `ExperimentSpec`, `create_experiment_runs`) was **deleted in 0.9.0**; it had no callers. Experiments still exist as registry rows, created through `Registry.create_experiment` / the CLI.
+`codt_tools/registry/` tracks experiments and runs in SQLite (docs in `docs/registry-*.md`). DB location convention: `--db` or `$CODT_REGISTRY_DB`; the DB lives on home/group space, never scratch. All access goes through `Registry` / the `codt-registry` CLI (pragmas, retry, txn coupling live in Python — never raw sqlite3 writes). Gate rule **changed in 0.9.0 (Stage 4): each reader owns the format string it reads** — see "Conventions" below. The registry keeps its own `SUPPORTED_CONVENTIONS` / `SUPPORTED_INPUT_CONVENTIONS` in `registry/versions.py` for `record_completion` and `register_run` (which records each NetCDF input's conventions plus the aerosol seed-group flag and cross-checks `do_seeding`); that copy goes away with `api.py` in Stage 5. `register_run` takes an optional `namelist=` (the staged `Namelist` returned by `Case.write_inputs`) and records *that* — what the run actually reads — rather than the case's own neutral paths. The YAML experiment layer (`experiment.py`, `ExperimentSpec`, `create_experiment_runs`) was **deleted in 0.9.0**; it had no callers. Experiments still exist as registry rows, created through `Registry.create_experiment` / the CLI.
 
 ## Case Layer (0.9.0)
 
@@ -163,7 +163,7 @@ execution is *artifact generation*: codt_tools writes a script, you launch it.
 |---|---|
 | `stage()` | `case.write_inputs(workdir/"inputs", output_directory=workdir/"output")`; returns the staged `Namelist`. **Does not modify the case** — one case stages any number of runs. |
 | `execute_local(**kw)` | runs the binary on the **absolute** `inputs/params.nml`, blocking; returns `CompletedProcess`. Warns with a plain-language cause when the binary dies on a signal (SIGILL = built for another CPU). |
-| `open_simulation()` | `CODTSimulation` on `output/`; raises unless `is_complete` |
+| `open_simulation()` | delegates to `Simulation.from_run(self)`; raises unless `is_complete` |
 | `is_complete` / `is_staged` | the `{case.name}_DONE` marker / the namelist exists |
 | `name`, `inputs_dir`, `output_dir`, `namelist_path`, `done_marker` | derived from `workdir`; `name` is the *directory* name, `done_marker` uses `case.name` (they need not match) |
 | `Run.for_cases(cases, exe, base_dir)` | one run per case at `base_dir/{case.name}`; **raises on duplicate names** |
@@ -216,6 +216,52 @@ text; recording is an explicit call (Stage 5 replaces the registry).
 
 `Case.validate()` (`case/validate.py`) mirrors the Fortran-side checks: range validation (N, tmax, H, pres, volume_scaling, Tref, simulation_mode) raises `ValueError`; cross-namelist inconsistencies (do_radiation without do_microphysics, write_eddies without do_turbulence, do_entrainment in chamber mode) issue `warnings.warn`.
 
+## Simulation Layer (0.9.0)
+
+`codt_tools/simulation/` replaces the loose `simulation.py` / `plotting.py` /
+`trajectory_io.py`:
+
+| module | contents |
+|---|---|
+| `simulation.py` | `Simulation` (was `CODTSimulation`) — moved intact, one class |
+| `plotting.py` | the `plot_*` helpers; `_get_label`/`_ensure_ax` are now public `get_label`/`ensure_ax` |
+| `trajectory.py` | was `trajectory_io.py` |
+
+`Simulation.from_run(run)` opens a completed run's output and raises if it has
+no `_DONE` marker; `Run.open_simulation()` delegates to it, so the two cannot
+drift. `Run` is imported under `TYPE_CHECKING` only, and `open_simulation`
+imports `Simulation` inside the method — staging and launching a run should not
+pay for xarray and matplotlib.
+
+**Analysis no longer imports the registry.** `simulation.py` used to do
+`from codt_tools.registry.versions import check_conventions`, which meant
+reading your own output pulled in the bookkeeping layer. Pinned by
+`tests/simulation/test_layer.py::TestNoRegistryDependency`, which asserts in a
+*fresh interpreter* that neither `import codt_tools` nor
+`import codt_tools.simulation` leaves anything under `codt_tools.registry` in
+`sys.modules`.
+
+### Conventions — each reader owns its format string
+
+There is deliberately **no registry of "supported" conventions** to keep in
+sync, and no top-level `conventions.py` (the refactor plan proposed one; it
+was not needed once the input-side gating turned out to be registry-only).
+
+| Reader | Constant | On mismatch |
+|---|---|---|
+| `simulation/simulation.py` | `OUTPUT_CONVENTIONS = "CODT_output_v1"` | **warns**, opens anyway |
+| `case/aerosol.py` | `_CONVENTIONS = "CODT_aerosol_input_v1"` | **raises** |
+| `case/parcel.py` | `CONVENTIONS = "CODT_parcel_input_v3"` | **raises** (names the retired v1/v2) |
+
+The asymmetry is the point: output already exists and a scientist must be able
+to look at it, so a mismatch is a warning naming expected vs found. A
+wrong-format *input* silently produces a wrong simulation, so that raises.
+
+`registry/versions.py` still holds its own `SUPPORTED_CONVENTIONS` /
+`SUPPORTED_INPUT_CONVENTIONS` / `RETIRED_INPUT_CONVENTIONS` for `api.py`'s
+registration-time checks — the only remaining caller — leaving
+`"CODT_output_v1"` written in two places until Stage 5 deletes `api.py`.
+
 ### Namelist group placement (must match what CODT reads)
 
 `Namelist._DEFAULTS` groups map 1:1 to the Fortran namelist of the same name. A param in the wrong group makes CODT reject the file (`Invalid parameter in &GROUP`). Defaults are aligned to CODT's **code** defaults (`docs/input_parameters.md`). Mode/switch gating in `Namelist.groups_for_write()` (public since 0.9.0): chamber omits `turbulence_lem`/`parcel`/`entrainment`; parcel omits `turbulence_odt`/`specialeffects`; `radiation` only when `do_radiation`; `entrainment` only when `do_entrainment`.
@@ -226,7 +272,7 @@ text; recording is an explicit call (Stage 5 replaces the registry).
 - `radiation_method` must be `'1d'` or `'3d'` (not `'two_stream'`)
 - `do_seeding, seed_hydration, seed_growth_time` → `&MICROPHYSICS` (not a `&SEEDING` group — there isn't one)
 
-`{name}_DONE` discovery: `Run.done_marker` and `CODTSimulation._discover_files` both correctly use `{name}_DONE`; the generated launch scripts glob `*_DONE` instead, since bash does not know `simulation_name`.
+`{name}_DONE` discovery: `Run.done_marker` and `Simulation._discover_files` both correctly use `{name}_DONE`; the generated launch scripts glob `*_DONE` instead, since bash does not know `simulation_name`.
 
 ## Binary File Readers
 
@@ -282,6 +328,12 @@ dt_record = np.dtype([('id_keep','<i4'),('id_kill','<i4'),('r_keep','<f8'),('r_k
 
 ## Merged
 
+- **Simulation layer** (codt_tools 0.9.0.dev0, Stage 4 of the
+  `docs/refactor-plan.md` refactor): `simulation.py` + `plotting.py` +
+  `trajectory_io.py` → `codt_tools/simulation/`, `CODTSimulation` →
+  `Simulation`, `Simulation.from_run`, and the analysis→registry import cut.
+  No top-level `conventions.py` — each reader owns its format string instead.
+  Breaking, no aliases. See "Simulation Layer (0.9.0)" above.
 - **Run layer** (codt_tools 0.9.0.dev0, Stage 3 of the `docs/refactor-plan.md`
   refactor): `runner.py` + `slurm.py` → `codt_tools/run/`, `CODTRunner` →
   `Run` + `write_local`/`write_slurm_array`. **All SLURM submission removed**
@@ -426,7 +478,7 @@ CODT now also **aborts at startup** when `smallest_eddy_gridpoints > N` or
   **unconditionally**. Field count/order/dtype are unchanged (3 × f8), so a
   pre-3.0.0 file still reads without error, but the value under that key is the
   old namelist input — check `code_version`.
-- `CODTSimulation.lem_scales()` returns whichever `LEM.*` attributes the file
+- `Simulation.lem_scales()` returns whichever `LEM.*` attributes the file
   carries (empty dict for chamber or pre-3.0.0 runs); `info()` prints them.
 
 **New optional global attributes** on parcel output — additive, so

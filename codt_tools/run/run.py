@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Union
 from codt_tools.case import Case, Namelist
 
 if TYPE_CHECKING:
-    from codt_tools.simulation import CODTSimulation
+    from codt_tools.simulation import Simulation
 
 #: Name of the namelist inside a run's ``inputs/`` directory.
 NAMELIST_FILENAME: str = "params.nml"
@@ -213,12 +213,12 @@ class Run:
     # Results
     # ------------------------------------------------------------------
 
-    def open_simulation(self) -> "CODTSimulation":
+    def open_simulation(self) -> "Simulation":
         """Open this run's output for analysis.
 
         Returns
         -------
-        CODTSimulation
+        Simulation
             Reader for ``output/``.
 
         Raises
@@ -227,14 +227,11 @@ class Run:
             If the run has not completed (no ``_DONE`` marker), which is
             reported in preference to whatever partial output exists.
         """
-        from codt_tools.simulation import CODTSimulation
+        # Imported here, not at module scope: the analysis layer pulls in
+        # xarray and matplotlib, which staging and launching do not need.
+        from codt_tools.simulation import Simulation
 
-        if not self.is_complete:
-            raise FileNotFoundError(
-                f"Run '{self.name}' is not complete: no marker at "
-                f"{self.done_marker}."
-            )
-        return CODTSimulation(self.output_dir)
+        return Simulation.from_run(self)
 
     # ------------------------------------------------------------------
     # Construction helpers

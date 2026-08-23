@@ -195,9 +195,9 @@ class Case:
         ...     run_dir="output/old_run/inputs",
         ... )
         """
-        from codt_tools.simulation import CODTSimulation
+        from codt_tools.simulation import Simulation
 
-        sim = CODTSimulation(path)
+        sim = Simulation(path)
 
         obj = cls.__new__(cls)
 

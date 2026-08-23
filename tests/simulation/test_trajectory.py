@@ -1,11 +1,11 @@
-"""Tests for codt_tools.trajectory_io (particle trajectory reader)."""
+"""Tests for codt_tools.simulation.trajectory (particle trajectory reader)."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from codt_tools.trajectory_io import (
+from codt_tools.simulation.trajectory import (
     load_particles,
     particles_at_timestep,
     record_times,

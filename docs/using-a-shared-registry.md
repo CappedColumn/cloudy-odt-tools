@@ -42,7 +42,7 @@ Each output NetCDF carries a `conventions` global attribute (e.g.
 read in `codt_tools.registry.SUPPORTED_CONVENTIONS`. The gate is
 checked:
 
-- when `CODTSimulation` opens an output file, and
+- when `Simulation` opens an output file, and
 - when `record_completion` stores a run's output metadata.
 
 By default a mismatch **warns** and proceeds (`check_conventions(...,

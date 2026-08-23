@@ -7,7 +7,7 @@ Cloudy One-Dimensional Turbulence (CODT) model.
 
 - **`Case`** — Build simulation input files (namelist, aerosol injection, parcel trajectory), and expand a design into an ensemble of them
 - **`Run`** — Stage a case into a run directory and execute it locally; generate launch scripts for a batch (local or SLURM) that you submit yourself
-- **`CODTSimulation`** — Load output, compute diagnostics, and produce publication-quality plots
+- **`Simulation`** — Load output, compute diagnostics, and produce publication-quality plots. Depends on nothing but the output files
 - **Multi-simulation comparison** — Overlay time series, profiles, and spectra across parameter sweeps
 - **Simulation registry** — SQLite-backed tracking of experiments and runs (parameters, code versions, status history, data location) with the `codt-registry` CLI
 
@@ -20,7 +20,7 @@ pip install -e .
 ## Quick Start
 
 ```python
-from codt_tools import Case, CODTSimulation, Run
+from codt_tools import Case, Run, Simulation
 
 # Configure
 case = Case()
@@ -38,8 +38,8 @@ sim.plot_timeheight("T")
 
 # Compare multiple runs
 cases = case.sweep({"params.tref": [20.0, 21.0, 22.0]})   # see docs/designs.md
-sims = [CODTSimulation(f"/path/to/output/{c.name}") for c in cases]
-CODTSimulation.compare(sims, "LWC", plot_type="timeseries")
+sims = [Simulation(f"/path/to/output/{c.name}") for c in cases]
+Simulation.compare(sims, "LWC", plot_type="timeseries")
 ```
 
 ## Simulation Registry

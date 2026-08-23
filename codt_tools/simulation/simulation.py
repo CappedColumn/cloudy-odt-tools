@@ -2,41 +2,73 @@
 
 Primary usage::
 
-    from codt_tools import CODTSimulation
+    from codt_tools import Simulation
 
-    sim = CODTSimulation("path/to/SWS100_C")
+    sim = Simulation("path/to/SWS100_C")
     sim.T           # Temperature DataArray (time, z)
     sim.LWC         # Liquid water content DataArray (time,)
     sim.profile("S", t=3600)
+
+Analysis is read-only and depends on nothing but the output files. In
+particular it does **not** import the registry: reading your own data should
+never require the bookkeeping layer.
 """
 
 from __future__ import annotations
 
 import pathlib
-from typing import Union
+import warnings
+from typing import TYPE_CHECKING, Union
 
 import numpy as np
 import xarray as xr
 
 from codt_tools.case import Namelist
-from codt_tools.registry.versions import check_conventions
-from codt_tools.plotting import (
-    _ensure_ax,
-    _get_label,
+from codt_tools.simulation.plotting import (
     comparison_colors,
+    ensure_ax,
+    get_label,
     plot_dsd_evolution as _plot_dsd_evolution,
     plot_profile as _plot_profile,
     plot_spectrum as _plot_spectrum,
     plot_timeheight as _plot_timeheight,
     plot_timeseries as _plot_timeseries,
 )
-from codt_tools.trajectory_io import (
+from codt_tools.simulation.trajectory import (
     load_particles as _load_particles,
     particles_at_timestep as _particles_at_timestep,
     record_times as _record_times,
     trajectory_of as _trajectory_of,
     unique_particle_ids as _unique_particle_ids,
 )
+
+if TYPE_CHECKING:
+    from codt_tools.run import Run
+
+#: The CODT output format this version of codt_tools reads.
+#:
+#: Each reader owns the format string it reads -- see ``case/aerosol.py`` and
+#: ``case/parcel.py`` for the input side. There is deliberately no registry of
+#: "supported" conventions to keep in sync.
+OUTPUT_CONVENTIONS: str = "CODT_output_v1"
+
+
+def _check_conventions(value: str | None, path: pathlib.Path) -> None:
+    """Warn when output was written in a format this version does not read.
+
+    A warning, not an error: the data already exists, and a scientist must
+    always be able to look at it. Input files raise instead, because a
+    wrong-format *input* silently produces a wrong simulation.
+    """
+    if value == OUTPUT_CONVENTIONS:
+        return
+    warnings.warn(
+        f"{path.name} declares conventions {value!r}, not "
+        f"{OUTPUT_CONVENTIONS!r}, which this codt_tools reads. Variables may "
+        f"be missing or renamed; check anything surprising against the file.",
+        UserWarning,
+        stacklevel=3,
+    )
 
 
 # CODT's hardcoded implied domain width (globals.f90: domain_width = 0.001 m),
@@ -95,7 +127,7 @@ _FIELD_REGISTRY: dict[str, str] = {
 # DSD_1, DSD_2, ... are discovered dynamically from the netCDF file.
 
 
-class CODTSimulation:
+class Simulation:
     """Load and analyze output from a completed CODT simulation.
 
     Parameters
@@ -107,7 +139,7 @@ class CODTSimulation:
 
     Examples
     --------
-    >>> sim = CODTSimulation("output/SWS100_C")
+    >>> sim = Simulation("output/SWS100_C")
     >>> sim.T
     <xarray.DataArray 'T' (time: 7201, z: 2000)>
     >>> sim.profile("T", t=3600)
@@ -124,10 +156,41 @@ class CODTSimulation:
         self._ds: xr.Dataset = xr.open_dataset(
             self._nc_path, decode_timedelta=False
         )
-        # Gate: warn if the output conventions are not supported by this
-        # version of codt_tools (analysis code may misread the file).
-        check_conventions(self._ds.attrs.get("conventions"))
+        # Warn if this file was written in a format this version does not
+        # read; analysis code may misread it.
+        _check_conventions(self._ds.attrs.get("conventions"), self._nc_path)
         self._load_params()
+
+    @classmethod
+    def from_run(cls, run: "Run") -> "Simulation":
+        """Open the output of a completed :class:`~codt_tools.run.Run`.
+
+        Parameters
+        ----------
+        run : Run
+            A run whose simulation has finished.
+
+        Returns
+        -------
+        Simulation
+            Reader for the run's ``output/`` directory.
+
+        Raises
+        ------
+        FileNotFoundError
+            If the run has not completed (no ``_DONE`` marker), which is
+            reported in preference to whatever partial output exists.
+
+        Examples
+        --------
+        >>> sim = Simulation.from_run(run)      # or run.open_simulation()
+        """
+        if not run.is_complete:
+            raise FileNotFoundError(
+                f"Run '{run.name}' is not complete: no marker at "
+                f"{run.done_marker}."
+            )
+        return cls(run.output_dir)
 
     # ------------------------------------------------------------------
     # File discovery
@@ -1157,7 +1220,7 @@ class CODTSimulation:
         t = times[mask]
         y = ds[variable].values[mask]
 
-        ax = _ensure_ax(ax)
+        ax = ensure_ax(ax)
         kwargs.setdefault("label", f"Particle {pid}")
         ax.plot(t, y, **kwargs)
         ax.set_xlabel("Time (s)")
@@ -1454,7 +1517,7 @@ class CODTSimulation:
 
     @staticmethod
     def compare(
-        simulations: list["CODTSimulation"],
+        simulations: list["Simulation"],
         variable: str,
         plot_type: str = "timeseries",
         t: float | None = None,
@@ -1473,7 +1536,7 @@ class CODTSimulation:
 
         Parameters
         ----------
-        simulations : list[CODTSimulation]
+        simulations : list[Simulation]
             Simulations to compare.
         variable : str
             NetCDF variable name (e.g. ``"T"``, ``"LWC"``, ``"S"``).
@@ -1506,10 +1569,10 @@ class CODTSimulation:
 
         Examples
         --------
-        >>> CODTSimulation.compare([sim1, sim2], "LWC")
-        >>> CODTSimulation.compare([sim1, sim2], "T",
+        >>> Simulation.compare([sim1, sim2], "LWC")
+        >>> Simulation.compare([sim1, sim2], "T",
         ...     plot_type="profile", t=30.0)
-        >>> CODTSimulation.compare([sim1, sim2], "DSD",
+        >>> Simulation.compare([sim1, sim2], "DSD",
         ...     plot_type="spectrum", t_start=30, t_end=60)
         """
         if not simulations:
@@ -1523,17 +1586,17 @@ class CODTSimulation:
             styles = [{"color": c} for c in colors]
 
         if plot_type == "timeseries":
-            return CODTSimulation._compare_timeseries(
+            return Simulation._compare_timeseries(
                 simulations, variable, t_start, t_end,
                 z_min, z_max, full_domain, labels, styles, ax, **kwargs,
             )
         elif plot_type == "profile":
-            return CODTSimulation._compare_profile(
+            return Simulation._compare_profile(
                 simulations, variable, t,
                 z_min, z_max, full_domain, labels, styles, ax, **kwargs,
             )
         elif plot_type == "spectrum":
-            return CODTSimulation._compare_spectrum(
+            return Simulation._compare_spectrum(
                 simulations, t_start, t_end, normalize,
                 labels, styles, ax, **kwargs,
             )
@@ -1564,12 +1627,12 @@ class CODTSimulation:
             series.append((da, labels[i]))
 
         if styles is not None:
-            ax = _ensure_ax(ax)
+            ax = ensure_ax(ax)
             for i, (da, label) in enumerate(series):
                 merged = {**kwargs, **styles[i]}
                 ax.plot(da.time.values, da.values, label=label, **merged)
             ax.set_xlabel("Time (s)")
-            ax.set_ylabel(_get_label(series[0][0]))
+            ax.set_ylabel(get_label(series[0][0]))
             ax.legend()
             return ax
 
@@ -1593,11 +1656,11 @@ class CODTSimulation:
             profiles.append((da, labels[i]))
 
         if styles is not None:
-            ax = _ensure_ax(ax)
+            ax = ensure_ax(ax)
             for i, (da, label) in enumerate(profiles):
                 merged = {**kwargs, **styles[i]}
                 ax.plot(da.values, da.z.values, label=label, **merged)
-            ax.set_xlabel(_get_label(profiles[0][0]))
+            ax.set_xlabel(get_label(profiles[0][0]))
             ax.set_ylabel("Height (m)")
             ax.legend()
             return ax
@@ -1615,7 +1678,7 @@ class CODTSimulation:
                 "Must specify t_start and t_end for spectrum comparison."
             )
 
-        ax = _ensure_ax(ax)
+        ax = ensure_ax(ax)
         for i, sim in enumerate(simulations):
             spectra = sim.dsd_average(t_start, t_end, normalize=normalize)
             da = spectra["DSD"]
@@ -1725,7 +1788,7 @@ class CODTSimulation:
             parts.append(f"N={self.N}")
         if self.Tref is not None:
             parts.append(f"Tref={self.Tref:.1f}")
-        return f"CODTSimulation({', '.join(parts)})"
+        return f"Simulation({', '.join(parts)})"
 
     # ------------------------------------------------------------------
     # Cleanup

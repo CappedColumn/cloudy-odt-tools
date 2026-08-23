@@ -161,11 +161,11 @@ Or in Python: `reg.query_runs(...)`, `reg.run_parameters(run_id)`,
 directory listings:
 
 ```python
-from codt_tools import CODTSimulation
+from codt_tools import Simulation
 
 run = reg.get_run("20260709_101500_codt_Tref18.0_VS13")
 exp = reg.get_experiment(run["experiment_id"])
-sim = CODTSimulation(Path(exp["data_root"]) / run["run_dir"] / "output")
+sim = Simulation(Path(exp["data_root"]) / run["run_dir"] / "output")
 ```
 
 Loading output emits a warning if the file's `conventions` attribute
@@ -228,4 +228,4 @@ point with a specific fix:
 | Run crashes / exits nonzero | Run marked `failed` with exit code; `detail` names the run's `.log` and the batch `*.out` file | Diagnose from those logs (see `codt-registry show <run_id>`) |
 | Job killed (walltime, OOM, node death) | Run stuck in `running`; SLURM job gone | Cross-check `sacct`, backfill status from the `_DONE` marker; raise `walltime` in the YAML and resubmit |
 | Botched copy at relocation | `codt-registry relocate` refuses (missing files / checksum mismatch); registry untouched | Re-run the `rsync`, then relocate again |
-| Output unreadable by tools | `CODTSimulation` warns on the `conventions` gate | Use a codt_tools version matching the run's recorded `conventions` |
+| Output written in an unknown format | `Simulation` warns (naming expected vs found) and opens it anyway | Nothing, usually — check anything surprising against the file |

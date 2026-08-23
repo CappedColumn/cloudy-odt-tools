@@ -9,15 +9,15 @@ except PackageNotFoundError:  # running from a source tree without install
 
 from codt_tools.case import Aerosol, Case, Namelist, Parcel
 from codt_tools.run import Run, check_executable, write_local, write_slurm_array
-from codt_tools.simulation import CODTSimulation
+from codt_tools.simulation import Simulation
 
 __all__ = [
     "Aerosol",
-    "CODTSimulation",
     "Case",
     "Namelist",
     "Parcel",
     "Run",
+    "Simulation",
     "check_executable",
     "write_local",
     "write_slurm_array",
