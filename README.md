@@ -3,13 +3,24 @@
 Python framework for configuring, running, and analyzing simulations from the
 Cloudy One-Dimensional Turbulence (CODT) model.
 
-## Features
+## The shape of it
 
-- **`Case`** — Build simulation input files (namelist, aerosol injection, parcel trajectory), and expand a design into an ensemble of them
-- **`Run`** — Stage a case into a run directory and execute it locally; generate launch scripts for a batch (local or SLURM) that you submit yourself
-- **`Simulation`** — Load output, compute diagnostics, and produce publication-quality plots. Depends on nothing but the output files
-- **Multi-simulation comparison** — Overlay time series, profiles, and spectra across parameter sweeps
-- **Simulation registry** — SQLite-backed tracking of experiments and runs (parameters, code versions, status history, data location) with the `codt-registry` CLI
+**A case describes a simulation. A run stages one into a directory and
+executes it. A simulation reads the output. The registry is optional.**
+
+| | |
+|---|---|
+| **`Case`** | The complete input description — namelist, aerosol, parcel trajectory. Expands into an ensemble via a *design*. Knows nothing about where it will be written. |
+| **`Run`** | One case + one binary + one directory. Stages inputs, runs the model locally, opens the output. Knows nothing about SLURM. |
+| **`Simulation`** | Read-only analysis: fields, profiles, averages, budgets, spectra, DSDs, trajectories, plots, and multi-run comparison. Depends on nothing but the output files. |
+| **`Registry`** | An optional list of the runs you have done. One table, seven columns. |
+
+Batch execution is **artifact generation**: codt_tools writes a launch script
+(local or SLURM), and you run it. Nothing here calls `sbatch`.
+
+New to it? Start with
+[docs/starting-a-project.md](docs/starting-a-project.md) — a project is three
+short scripts, and that page has all three.
 
 ## Installation
 
@@ -67,9 +78,21 @@ run finished is `run.is_complete` (the `_DONE` marker on disk), and grouping
 is the free-text `tags` column. See
 [docs/registry-quickstart.md](docs/registry-quickstart.md).
 
+## Documentation
+
+| | |
+|---|---|
+| [starting-a-project.md](docs/starting-a-project.md) | the three-script project layout — start here |
+| [designs.md](docs/designs.md) | expressing an ensemble: points, designs, `cross`, and the irregular cases |
+| [running-on-slurm.md](docs/running-on-slurm.md) | generating a batch script, picking a node constraint, preemption |
+| [registry-quickstart.md](docs/registry-quickstart.md) | recording what you ran |
+| [CHANGELOG.md](CHANGELOG.md) | version history — **and facts needed to read archived output** |
+
+Requires a **CODT 3.1.0+** binary.
+
 ## Dependencies
 
-- numpy, xarray, netCDF4, matplotlib, f90nml, pyyaml
+- numpy, xarray, netCDF4, matplotlib, f90nml
 
 ## Testing
 

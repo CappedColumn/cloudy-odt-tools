@@ -44,7 +44,8 @@ class Namelist:
     #   REAL(8)  -> float
     #   LOGICAL  -> bool
     #   CHARACTER -> str
-    # Defaults mirror CODT's *code* defaults (docs/input_parameters.md). Each
+    # Defaults mirror CODT's *code* defaults (see docs/input_parameters.md
+    # in the CODT repository, not this one). Each
     # internal group maps directly to the Fortran namelist of the same name,
     # so a parameter MUST live in the group CODT reads it from — putting it
     # elsewhere makes CODT reject the namelist ("Invalid parameter in &GROUP").

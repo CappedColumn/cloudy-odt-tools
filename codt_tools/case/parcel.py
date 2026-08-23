@@ -8,7 +8,7 @@ targets need no monotonic order. Completing the last leg ends the simulation,
 possibly before ``tmax``.
 
 The v1 (time segments) and v2 (time segments + sounding) schemas are rejected by
-CODT and are not readable here; see ``docs/codt_v3_migration.md`` to convert.
+CODT and are not readable here; regenerate them in the v3 waypoint format.
 
 ``Parcel`` is the in-memory form; the three functions below are the file format
 itself, kept public because they are the format's only specification.
@@ -225,9 +225,11 @@ def read_parcel(path: Union[str, Path]) -> dict[str, Any]:
             extra = ""
             if conventions in ("CODT_parcel_input_v1", "CODT_parcel_input_v2"):
                 extra = (
-                    " (v1/v2 parcel inputs are no longer supported; regenerate "
-                    "the file in the v3 waypoint format — see "
-                    "docs/codt_v3_migration.md)"
+                    " (v1/v2 parcel inputs are no longer supported. They keyed "
+                    "the lookup by position within a segment; v3 uses waypoint "
+                    "legs keyed by a leg counter, and redefines ent_rate as "
+                    "1/km rather than 1/m — a 1000x change. Rebuild the file "
+                    "with Parcel.set(), or read it with codt_tools 0.4.x.)"
                 )
             raise ValueError(
                 f"Expected conventions='{CONVENTIONS}', "

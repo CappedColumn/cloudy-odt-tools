@@ -17,7 +17,6 @@ dependencies = [
     "netCDF4",
     "matplotlib",
     "f90nml",
-    "pyyaml",
 ]
 
 [project.scripts]
