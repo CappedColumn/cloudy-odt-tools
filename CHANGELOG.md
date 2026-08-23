@@ -13,6 +13,8 @@ Current behavior lives in [CLAUDE.md](CLAUDE.md).
 
 ## 1.0.0 — the case/run/simulation refactor
 
+*Requires CODT 3.1.0 or newer.*
+
 `config.py` / `runner.py` / `slurm.py` / `experiment.py` / the six-table
 registry became four layers: `case/`, `run/`, `simulation/`, `registry/`.
 A clean break with no compatibility aliases; code pinned to the old names
