@@ -247,7 +247,7 @@ def write_slurm_array(
         ])
 
     lines = [
-        "#!/bin/bash",
+        "#!/bin/bash -l",
         *sbatch,
         "",
         *_preamble(len(runs)),
