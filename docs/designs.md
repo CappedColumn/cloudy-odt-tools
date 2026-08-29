@@ -1,8 +1,8 @@
 # Designs: describing an ensemble
 
-A single simulation is a `Case`. A set of simulations is a **design**, and this
-document is about writing designs down — including the irregular ones, which is
-most of them.
+A single simulation is a `Case`. A set of simulations is a **design**. This
+document shows you how to record a design, including the irregular ones. Most
+real designs are irregular.
 
 ## The vocabulary
 
@@ -54,7 +54,7 @@ components.
 cases = base.sweep({
     "params.tref":           [20.0, 21.0, 22.0],
     "params.volume_scaling": [13, 50],
-})                                    # 6 cases: sweep_000 ... sweep_005
+})                                    # 6 cases: EXP001_000 ... EXP001_005
 ```
 
 A dict of `path -> values` handed straight to `sweep` is shorthand for the plain
@@ -67,8 +67,8 @@ dict manipulation, so they compose freely.
 
 ### Values that vary together
 
-An axis is a *list of points*, so anything sampled or paired is expressed
-directly — no zip helper, no syntax.
+An axis is a *list of points*, so you write sampled or paired values directly.
+There is no zip helper and no special syntax.
 
 ```python
 # a Latin hypercube: 10 points in 4 dimensions, NOT 10**4 combinations
@@ -84,7 +84,7 @@ design = cross(lhs, reps)             # 10 x 5 = 50
 
 ### Derived values
 
-A value that follows from another is computed where the axis is built:
+Compute a value that follows from another where you build the axis:
 
 ```python
 axis = [{"params.ent_rate": r, "params.do_entrainment": r > 0.0}
@@ -163,8 +163,8 @@ design = [p for p in grid
           if int(p["params.psigma"] * p["params.n"]) >= p["params.n_blob"]]
 ```
 
-`case.validate()` catches the same thing later; filtering the design keeps the
-run count honest.
+`case.validate()` catches the same thing later. Filter the design as well, to
+keep the run count honest.
 
 ### Whole components per branch
 
@@ -224,11 +224,14 @@ Run names become run *directory* names, so the default is an index:
 `{base_name}_000`, `_001`, … (widened past a thousand runs). It is always
 path-safe and can never collide, whatever the design varies.
 
-**The mapping from index to parameters is not stored by the case layer.** It is
-recoverable from each run's own staged inputs — `inputs/params.nml` plus the
-NetCDF input files — and from the registry, which records per-run namelist
-parameters and input checksums. Keeping a second copy of that mapping in a
-sidecar file would just be a third thing to fall out of date.
+**The case layer does not store the mapping from index to parameters.** Each run
+holds its own configuration in its staged inputs: `inputs/params.nml` plus the
+NetCDF input files. Open run 004 and you can read what it was. The registry
+does not hold the mapping either. Its seven columns record that a run happened,
+and where it is.
+
+Write the mapping yourself when you build the design if you want to read the
+design as a table. See "Recording the design" below.
 
 For a project convention, pass `name=`, which receives `(index, point)`:
 
@@ -249,14 +252,15 @@ Duplicate names raise: two runs cannot share a directory.
 ## What this deliberately doesn't do
 
 - **No sweep DSL.** No axis objects, conditional-axis syntax, or constraint
-  expressions. Everything above is list and dict manipulation you can print,
-  slice, and debug with the tools you already have — and a DSL could not
-  express the branch/filter cases without growing into a small language.
-- **No adaptive designs.** A design is fixed before anything runs. Choosing the
-  next points from finished results is a second sweep, written after the
+  expressions. Everything above is list and dict manipulation. You can print,
+  slice and debug it with the tools you already have. A DSL could not express
+  the branch and filter cases without growing into a small language.
+- **No adaptive designs.** A design is fixed before anything runs. To choose
+  the next points from finished results, write a second sweep after the
   analysis.
-- **No manifest file.** See "Naming" above; the run inputs and the registry are
-  the record.
+- **No manifest file written for you.** The staged inputs are the record of
+  what each run was. Write your own index if you want to read the design as a
+  table. See "Recording the design" below.
 
 ## Recording the design
 
@@ -312,8 +316,7 @@ write_slurm_array(runs, base_dir / "array.sh", runs_per_task=64,
 
 ## See also
 
-- `configure-run-codt` skill — the API reference for `Case`, `Aerosol`, `Parcel`
-  and `Run`.
+- `docs/file-formats.md` — what CODT reads and writes, and where.
 - `docs/running-on-slurm.md` — turning a staged ensemble into a batch script.
 - `docs/registry-quickstart.md` — recording an ensemble in the registry.
-- `codt_tools/case/mutate.py` — the implementation; it is short.
+- `codt_tools/case/mutate.py` — the implementation. It is short.
